@@ -26,7 +26,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y aapt unzip jq ripgrep file binutils
-          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest             | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url'             | head -n1)"
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url' \
+            | head -n1)"
           test -n "$JADX_URL"
           curl -fL "$JADX_URL" -o /tmp/jadx.zip
           unzip -q /tmp/jadx.zip -d "$RUNNER_TEMP/jadx"
@@ -35,11 +37,14 @@ jobs:
       - name: Download latest package from APKPure
         run: |
           mkdir -p work/download
-          docker run --rm             -v "$PWD/work/download:/output"             ghcr.io/efforg/apkeep:stable             -a "$PACKAGE_ID" -d apk-pure /output
+          docker run --rm \
+            -v "$PWD/work/download:/output" \
+            ghcr.io/efforg/apkeep:stable \
+            -a "$PACKAGE_ID" -d apk-pure /output
           echo "Downloaded:"
           find work/download -maxdepth 1 -type f -printf '%f %s bytes\n'
 
-      - name: Select base APK
+      - name: Unpack XAPK and identify base APK
         id: apk
         shell: bash
         run: |
@@ -48,7 +53,6 @@ jobs:
 
           PACKAGE_FILE="$(find work/download -maxdepth 1 -type f | head -n1)"
           test -n "$PACKAGE_FILE"
-          echo "package_file=$PACKAGE_FILE" >> "$GITHUB_OUTPUT"
 
           case "$PACKAGE_FILE" in
             *.xapk|*.apks|*.zip)
@@ -67,20 +71,39 @@ jobs:
               ;;
           esac
 
-          BASE_APK="$(find work/unpacked -type f -name '*.apk' -printf '%s %p\n'             | sort -nr | head -n1 | cut -d' ' -f2-)"
+          echo "APK splits in package:"
+          while IFS= read -r apk; do
+            size="$(stat -c%s "$apk")"
+            badge="$(aapt dump badging "$apk" 2>/dev/null | head -n1 || true)"
+            printf '%s\t%s bytes\t%s\n' "$apk" "$size" "$badge"
+          done < <(find work/unpacked -type f -name '*.apk' | sort)
+
+          BASE_APK=""
+          while IFS= read -r apk; do
+            badge="$(aapt dump badging "$apk" 2>/dev/null | head -n1 || true)"
+            if [ -n "$badge" ] && ! grep -q " split='" <<<"$badge"; then
+              BASE_APK="$apk"
+              break
+            fi
+          done < <(find work/unpacked -type f -name '*.apk' | sort)
+
+          if [ -z "$BASE_APK" ]; then
+            BASE_APK="$(find work/unpacked -type f \( -name 'base.apk' -o -name "$PACKAGE_ID.apk" \) | head -n1)"
+          fi
+
           test -n "$BASE_APK"
           echo "base_apk=$BASE_APK" >> "$GITHUB_OUTPUT"
-          echo "Selected base APK: $BASE_APK"
-          aapt dump badging "$BASE_APK" | head -n 5
+          echo "Selected real base APK: $BASE_APK"
+          aapt dump badging "$BASE_APK" | head -n 8
 
-      - name: Decompile for static inspection
+      - name: Decompile real base APK
         shell: bash
         run: |
           set -euo pipefail
           BASE_APK="${{ steps.apk.outputs.base_apk }}"
           mkdir -p work/jadx
           jadx --show-bad-code --no-debug-info -d work/jadx "$BASE_APK" >/tmp/jadx.log 2>&1 || true
-          tail -n 80 /tmp/jadx.log > work/report/jadx.log
+          tail -n 100 /tmp/jadx.log > work/report/jadx.log
 
       - name: Build compact forensic report
         shell: bash
@@ -88,96 +111,116 @@ jobs:
           set -euo pipefail
           BASE_APK="${{ steps.apk.outputs.base_apk }}"
           REPORT=work/report/report.md
-
           SHA256="$(sha256sum "$BASE_APK" | awk '{print $1}')"
           APK_SIZE="$(stat -c%s "$BASE_APK")"
 
           {
             echo "# PUB viewer competitor static analysis"
             echo
-            echo "- Package target: \`$PACKAGE_ID\`"
-            echo "- Base APK: \`$BASE_APK\`"
-            echo "- Base APK size: \`$APK_SIZE bytes\`"
-            echo "- SHA-256: \`$SHA256\`"
+            echo "- Package target: `$PACKAGE_ID`"
+            echo "- Real base APK: `$BASE_APK`"
+            echo "- Base APK size: `$APK_SIZE bytes`"
+            echo "- SHA-256: `$SHA256`"
             echo
-            echo "## APK badging"
+            echo "## All APK splits"
             echo '~~~text'
-            aapt dump badging "$BASE_APK" | head -n 30
+            while IFS= read -r apk; do
+              size="$(stat -c%s "$apk")"
+              badge="$(aapt dump badging "$apk" 2>/dev/null | head -n1 || true)"
+              printf '%s\t%s bytes\t%s\n' "$apk" "$size" "$badge"
+            done < <(find work/unpacked -type f -name '*.apk' | sort)
             echo '~~~'
             echo
-            echo "## Declared permissions"
+            echo "## Base APK badging"
+            echo '~~~text'
+            aapt dump badging "$BASE_APK" | head -n 40
+            echo '~~~'
+            echo
+            echo "## Base APK permissions"
             echo '~~~text'
             aapt dump permissions "$BASE_APK" || true
             echo '~~~'
-            echo
-            echo "## Native libraries"
-            echo '~~~text'
-            unzip -l "$BASE_APK" | awk '{print $4}' | grep -E '^lib/.+\\.so$' | sort -u || true
-            echo '~~~'
           } > "$REPORT"
 
-          ZIPLIST="$(unzip -l "$BASE_APK" | awk '{print $4}')"
+          ALL_ENTRIES="$(for apk in $(find work/unpacked -type f -name '*.apk' | sort); do unzip -Z1 "$apk" 2>/dev/null || true; done)"
           FRAMEWORK="Native Android / undetermined"
-          if grep -q 'libflutter.so' <<<"$ZIPLIST"; then FRAMEWORK="Flutter"; fi
-          if grep -Eq 'libreactnativejni.so|index.android.bundle' <<<"$ZIPLIST"; then FRAMEWORK="React Native"; fi
-          if grep -Eq 'assets/www/|cordova.js' <<<"$ZIPLIST"; then FRAMEWORK="Cordova / WebView hybrid"; fi
-          if grep -q 'libunity.so' <<<"$ZIPLIST"; then FRAMEWORK="Unity"; fi
-          if grep -Eq 'libmonodroid.so|assemblies/' <<<"$ZIPLIST"; then FRAMEWORK="Xamarin / .NET Android"; fi
+          if grep -q 'libflutter.so' <<<"$ALL_ENTRIES"; then FRAMEWORK="Flutter"; fi
+          if grep -Eq 'libreactnativejni.so|index.android.bundle' <<<"$ALL_ENTRIES"; then FRAMEWORK="React Native"; fi
+          if grep -Eq 'assets/www/|cordova.js' <<<"$ALL_ENTRIES"; then FRAMEWORK="Cordova / WebView hybrid"; fi
+          if grep -q 'libunity.so' <<<"$ALL_ENTRIES"; then FRAMEWORK="Unity"; fi
+          if grep -Eq 'libmonodroid.so|assemblies/' <<<"$ALL_ENTRIES"; then FRAMEWORK="Xamarin / .NET Android"; fi
 
           {
             echo
-            echo "## Framework fingerprint"
+            echo "## Framework fingerprint across all splits"
             echo
             echo "**Detected:** $FRAMEWORK"
             echo
-            echo "Relevant APK entries:"
+            echo "Relevant entries:"
             echo '~~~text'
-            grep -E 'libflutter.so|libapp.so|libreactnativejni.so|index.android.bundle|assets/www/|cordova.js|libunity.so|libmonodroid.so|assemblies/' <<<"$ZIPLIST" | head -n 100 || true
+            grep -E 'libflutter.so|libapp.so|flutter_assets|libreactnativejni.so|index.android.bundle|assets/www/|cordova.js|libunity.so|libmonodroid.so|assemblies/' <<<"$ALL_ENTRIES" | sort -u | head -n 200 || true
+            echo '~~~'
+            echo
+            echo "## Native libraries across all splits"
+            echo '~~~text'
+            for apk in $(find work/unpacked -type f -name '*.apk' | sort); do
+              entries="$(unzip -Z1 "$apk" 2>/dev/null | grep -E '^lib/.+\.so$' || true)"
+              if [ -n "$entries" ]; then
+                echo "### $apk"
+                echo "$entries"
+              fi
+            done
             echo '~~~'
           } >> "$REPORT"
 
-          # Only collect ordinary URLs/domains. Do not collect keys, tokens or credentials.
           python3 - <<'PY'
           import pathlib, re
           root = pathlib.Path("work/jadx")
           urls = set()
           pat = re.compile(r'https?://[^\s"\'<>\\)]+')
           for p in root.rglob("*"):
-              if not p.is_file() or p.stat().st_size > 2_000_000:
+              if not p.is_file() or p.stat().st_size > 5_000_000:
                   continue
               try:
                   text = p.read_text(errors="ignore")
               except Exception:
                   continue
               for u in pat.findall(text):
-                  if len(u) <= 300:
+                  if len(u) <= 400:
                       urls.add(u.rstrip(".,;"))
           pathlib.Path("work/report/urls.txt").write_text("\n".join(sorted(urls)) + ("\n" if urls else ""))
           PY
 
           {
             echo
-            echo "## Network endpoints / domains found in code"
+            echo "## Network endpoints / domains found in decompiled base"
             echo '~~~text'
-            head -n 200 work/report/urls.txt || true
+            head -n 300 work/report/urls.txt || true
             echo '~~~'
             echo
-            echo "## PUB / conversion / upload implementation clues"
+            echo "## PUB / upload / conversion implementation clues"
             echo '~~~text'
-            rg -i -n --no-heading               'libmspub|mspub|publisher|\.pub|multipart|upload|convert|conversion|retrofit|okhttp|webview|preview|pdf|png|webp'               work/jadx/sources work/jadx/resources 2>/dev/null               | sed -E 's/[A-Za-z0-9_=-]{40,}/<REDACTED_LONG_TOKEN>/g'               | head -n 400 || true
+            rg -i -n --no-heading \
+              'libmspub|mspub|publisher|\.pub|multipart|upload|convert|conversion|retrofit|okhttp|volley|webview|preview|pdf|image|endpoint|baseurl|api/' \
+              work/jadx/sources work/jadx/resources 2>/dev/null \
+              | sed -E 's/[A-Za-z0-9_=-]{40,}/<REDACTED_LONG_TOKEN>/g' \
+              | head -n 800 || true
             echo '~~~'
             echo
-            echo "## Native-code PUB engine fingerprints"
+            echo "## Native-code engine fingerprints across all splits"
             echo '~~~text'
-            for so in $(unzip -Z1 "$BASE_APK" | grep -E '^lib/.+\\.so$' || true); do
-              tmp="work/native/$(basename "$so")"
-              mkdir -p work/native
-              unzip -p "$BASE_APK" "$so" > "$tmp"
-              hits="$(strings "$tmp" | grep -Ei 'libmspub|mspub|publisher|libreoffice|uno|pub[0-9]?' | head -n 40 || true)"
-              if [ -n "$hits" ]; then
-                echo "### $so"
-                echo "$hits"
-              fi
+            mkdir -p work/native
+            for apk in $(find work/unpacked -type f -name '*.apk' | sort); do
+              while IFS= read -r so; do
+                [ -n "$so" ] || continue
+                out="work/native/$(basename "$apk")__$(basename "$so")"
+                unzip -p "$apk" "$so" > "$out"
+                hits="$(strings "$out" | grep -Ei 'libmspub|mspub|publisher|libreoffice|librevenge|uno|compound file|ole|cfb|pdf|flutter' | head -n 100 || true)"
+                if [ -n "$hits" ]; then
+                  echo "### $apk :: $so"
+                  echo "$hits"
+                fi
+              done < <(unzip -Z1 "$apk" 2>/dev/null | grep -E '^lib/.+\.so$' || true)
             done
             echo '~~~'
           } >> "$REPORT"
