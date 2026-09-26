@@ -1,0 +1,160 @@
+name: Canyua corpus emulator smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/canyua-corpus-emulator-smoke.yml"
+      - "experiments/canyua-corpus-smoke-v1.csv"
+      - "experiments/run-canyua-corpus-smoke.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Confirm Apple Silicon runner
+        run: |
+          uname -a
+          uname -m
+          test "$(uname -m)" = "arm64"
+
+      - name: Download pinned Canyua package artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p work/canyua work/apks
+          gh run download 36275409853             --repo HeisLuka/Der             --name package-canyua-publisher             --dir work/canyua
+          XAPK="$(find work/canyua -type f -name '*.xapk' | head -n1)"
+          test -n "$XAPK"
+          unzip -q "$XAPK" -d work/apks
+          echo "Canyua APK splits:"
+          ls -lh work/apks/*.apk
+          shasum -a 256 "$XAPK" > work/canyua-xapk.sha256
+
+      - name: Materialize stratified corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/corpus/source work/corpus/synthetic
+          printf 'slug,class,filename,path\n' > work/runtime-manifest.csv
+
+          tail -n +2 experiments/canyua-corpus-smoke-v1.csv | while IFS=',' read -r slug class filename url expected notes; do
+            out="work/corpus/source/$filename"
+            echo "Downloading $slug :: $filename"
+            curl --fail --location --retry 3 --connect-timeout 20 "$url" -o "$out"
+            actual="$(shasum -a 256 "$out" | awk '{print $1}')"
+            if [ -n "$expected" ] && [ "$actual" != "$expected" ]; then
+              echo "SHA mismatch for $slug: expected $expected got $actual" >&2
+              exit 1
+            fi
+            printf '%s,%s,%s,%s\n' "$slug" "$class" "$filename" "$PWD/$out" >> work/runtime-manifest.csv
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          src = Path("work/corpus/source/Sample.pub").read_bytes()
+          outdir = Path("work/corpus/synthetic")
+          outdir.mkdir(parents=True, exist_ok=True)
+
+          variants = {}
+
+          for pct in (75, 50, 25):
+              n = max(1, len(src) * pct // 100)
+              variants[f"sample_truncated_{pct}.pub"] = src[:n]
+
+          b = bytearray(src)
+          b[:8] = b"\x00" * 8
+          variants["sample_bad_cfb_header.pub"] = bytes(b)
+
+          b = bytearray(src)
+          for off in range(4096, len(b), 16384):
+              for i in range(off, min(off + 16, len(b))):
+                  b[i] ^= 0xA5
+          variants["sample_sparse_xor.pub"] = bytes(b)
+
+          for name, data in variants.items():
+              p = outdir / name
+              p.write_bytes(data)
+              print(name, len(data), hashlib.sha256(data).hexdigest())
+          PY
+
+          for f in work/corpus/synthetic/*.pub; do
+            base="$(basename "$f")"
+            slug="${base%.pub}"
+            class="synthetic_corrupt"
+            printf '%s,%s,%s,%s\n' "$slug" "$class" "$base" "$PWD/$f" >> work/runtime-manifest.csv
+          done
+
+          echo "--- runtime manifest ---"
+          cat work/runtime-manifest.csv
+          echo "--- corpus hashes ---"
+          find work/corpus -type f -name '*.pub' -print0 | xargs -0 shasum -a 256 | sort > work/corpus.sha256
+          cat work/corpus.sha256
+
+      - name: Run ARM64 Android emulator corpus probe
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_6
+          cores: 3
+          ram-size: 4096M
+          heap-size: 1024M
+          disk-size: 8G
+          disable-animations: true
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -gpu swiftshader_indirect
+          script: bash experiments/run-canyua-corpus-smoke.sh
+
+      - name: Build machine-readable rollup
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import csv, json, pathlib
+          p = pathlib.Path("work/results/summary.csv")
+          out = {
+              "schema": "der/canyua-corpus-smoke/v1",
+              "source_manifest": "experiments/canyua-corpus-smoke-v1.csv",
+              "offline_during_file_tests": True,
+              "canyua_package": "com.canyua.publisherexpert",
+              "canyua_version": "5.1.1",
+              "rows": [],
+          }
+          if p.exists():
+              with p.open(newline="", errors="replace") as f:
+                  out["rows"] = list(csv.DictReader(f))
+          pathlib.Path("work/results/summary.json").write_text(
+              json.dumps(out, indent=2, ensure_ascii=False) + "\n"
+          )
+          print(json.dumps(out, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Upload corpus probe results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-corpus-smoke-results
+          path: |
+            work/results/
+            work/runtime-manifest.csv
+            work/corpus.sha256
+            work/canyua-xapk.sha256
+          if-no-files-found: warn
+          retention-days: 30
