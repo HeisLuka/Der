@@ -1,0 +1,95 @@
+name: Canyua x86 native-bridge probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/canyua-x86-nativebridge-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm || true
+
+      - name: Download pinned Canyua package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p work/canyua work/apks work/results
+          gh run download 36275409853 --repo HeisLuka/Der --name package-canyua-publisher --dir work/canyua
+          XAPK="$(find work/canyua -type f -name '*.xapk' | head -n1)"
+          test -n "$XAPK"
+          unzip -q "$XAPK" -d work/apks
+          ls -lh work/apks/*.apk
+
+      - name: Probe x86 native bridge
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_4
+          cores: 2
+          ram-size: 3072M
+          heap-size: 768M
+          disk-size: 6G
+          disable-animations: true
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -no-metrics
+            -gpu swiftshader_indirect
+          script: |
+            set -euxo pipefail
+            {
+              echo "=== ABI ==="
+              adb shell getprop ro.product.cpu.abilist
+              adb shell getprop ro.product.cpu.abilist64
+              echo "=== native bridge ==="
+              adb shell getprop ro.dalvik.vm.native.bridge
+              adb shell getprop ro.enable.native.bridge.exec
+              adb shell getprop ro.ndk_translation.version
+              echo "=== bridge files ==="
+              adb shell 'find /system /vendor /product -iname "*ndk_translation*" -o -iname "libnb.so" 2>/dev/null | head -100' || true
+            } | tee work/results/device.txt
+
+            set +e
+            adb install-multiple -r work/apks/*.apk > work/results/install.txt 2>&1
+            rc=$?
+            set -e
+            echo "install_rc=$rc" | tee -a work/results/install.txt
+            cat work/results/install.txt
+            if [ "$rc" -eq 0 ]; then
+              adb shell am force-stop com.canyua.publisherexpert || true
+              adb shell monkey -p com.canyua.publisherexpert -c android.intent.category.LAUNCHER 1 > work/results/launch.txt 2>&1 || true
+              sleep 8
+              adb shell dumpsys activity activities > work/results/activity.txt || true
+              adb logcat -d -v threadtime > work/results/logcat.txt || true
+              adb exec-out screencap -p > work/results/screen.png || true
+            fi
+
+      - name: Upload probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-x86-nativebridge-probe
+          path: work/results/
+          if-no-files-found: warn
+          retention-days: 30
