@@ -15,48 +15,69 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Inspect public 3.1.35 archive page
+      - name: Query Aptoide public version API
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p work
-          URL='https://ff.phoneky.com/android/?id=d1d262450'
-          curl -A 'Mozilla/5.0' -L --fail --compressed "$URL" -o work/page.html
+          VERSIONS='https://ws75.aptoide.com/api/7/listAppVersions?package_name=com.canyua.publisherexpert&limit=100'
+          curl -L --fail --compressed "$VERSIONS" -o work/versions.json
           python3 - <<'PY'
-          from html.parser import HTMLParser
-          from urllib.parse import urljoin
+          import json
           from pathlib import Path
-
-          base='https://ff.phoneky.com/android/?id=d1d262450'
-          html=Path('work/page.html').read_text(errors='replace')
-
-          class P(HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.items=[]
-              def handle_starttag(self, tag, attrs):
-                  d=dict(attrs)
-                  if tag in ('a','form','input','button','iframe','script'):
-                      self.items.append((tag,d))
-          p=P(); p.feed(html)
-
-          for tag,d in p.items:
-              vals=' '.join(f'{k}={v}' for k,v in d.items())
-              low=vals.lower()
-              if any(x in low for x in ('apk','download','d1d262450','262450','android')):
-                  print(tag, vals)
-
-          print('--- URL candidates ---')
-          import re
-          seen=set()
-          for u in re.findall(r'https?://[^"\'<> ]+|(?:href|action|src)=["\']([^"\']+)', html, flags=re.I):
-              if isinstance(u, tuple):
-                  u=next((x for x in u if x), '')
-              if not u: continue
-              full=urljoin(base,u)
-              if full in seen: continue
-              seen.add(full)
-              if any(x in full.lower() for x in ('download','apk','262450','d1d262450')):
-                  print(full)
+          data=json.loads(Path("work/versions.json").read_text())
+          items=((data.get("datalist") or {}).get("list") or [])
+          for x in items:
+              f=x.get("file") or {}
+              print(f.get("vername"), f.get("vercode"), f.get("md5sum"), f.get("path"), f.get("filesize") or f.get("size"))
+          target=next((x for x in items if (x.get("file") or {}).get("vername")=="3.1.10"), None)
+          if not target:
+              raise SystemExit("3.1.10 not present in Aptoide version API")
+          f=target["file"]
+          Path("work/target.json").write_text(json.dumps({
+              "vername":f.get("vername"),
+              "vercode":f.get("vercode"),
+              "md5sum":f.get("md5sum"),
+              "path":f.get("path"),
+              "size":f.get("filesize") or f.get("size"),
+              "signature":f.get("signature"),
+          }, indent=2)+"\n")
+          print("--- target ---")
+          print(Path("work/target.json").read_text())
           PY
-          grep -Ein 'download|\.apk|262450|d1d262450|form|action=' work/page.html | head -n 300 || true
+
+      - name: Download target and inspect protection markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(python3 -c 'import json; print(json.load(open("work/target.json"))["path"])')"
+          curl -L --fail --retry 3 "$URL" -o work/canyua-3.1.10.apk
+          sha256sum work/canyua-3.1.10.apk | tee work/sha256.txt
+          unzip -Z1 work/canyua-3.1.10.apk | grep -Ei 'pairip|licensecheck|libmspub|libpubBuilder|\.so$' | head -n 300 | tee work/markers.txt || true
+          python3 - <<'PY'
+          import zipfile, re
+          z=zipfile.ZipFile("work/canyua-3.1.10.apk")
+          hits=[]
+          for name in z.namelist():
+              if not (name.endswith(".dex") or name=="AndroidManifest.xml"):
+                  continue
+              b=z.read(name)
+              for pat in [b"com/pairip",b"licensecheck",b"libmspub",b"pubBuilder"]:
+                  if pat.lower() in b.lower():
+                      hits.append((name,pat.decode()))
+          print("binary marker hits:",hits)
+          open("work/binary-markers.txt","w").write(repr(hits)+"\n")
+          PY
+
+      - name: Upload metadata only
+        uses: actions/upload-artifact@v4
+        with:
+          name: old-canyua-discovery-metadata
+          path: |
+            work/versions.json
+            work/target.json
+            work/sha256.txt
+            work/markers.txt
+            work/binary-markers.txt
+          if-no-files-found: error
+          retention-days: 30
