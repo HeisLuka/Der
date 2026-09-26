@@ -1,0 +1,202 @@
+name: Analyze PUB viewer competitor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/analyze-pub-viewer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PACKAGE_ID: com.vdprime.pubviewerandconverter
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aapt unzip jq ripgrep file binutils
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest             | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url'             | head -n1)"
+          test -n "$JADX_URL"
+          curl -fL "$JADX_URL" -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d "$RUNNER_TEMP/jadx"
+          echo "$RUNNER_TEMP/jadx/bin" >> "$GITHUB_PATH"
+
+      - name: Download latest package from APKPure
+        run: |
+          mkdir -p work/download
+          docker run --rm             -v "$PWD/work/download:/output"             ghcr.io/efforg/apkeep:stable             -a "$PACKAGE_ID" -d apk-pure /output
+          echo "Downloaded:"
+          find work/download -maxdepth 1 -type f -printf '%f %s bytes\n'
+
+      - name: Select base APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/unpacked work/report
+
+          PACKAGE_FILE="$(find work/download -maxdepth 1 -type f | head -n1)"
+          test -n "$PACKAGE_FILE"
+          echo "package_file=$PACKAGE_FILE" >> "$GITHUB_OUTPUT"
+
+          case "$PACKAGE_FILE" in
+            *.xapk|*.apks|*.zip)
+              unzip -q "$PACKAGE_FILE" -d work/unpacked
+              ;;
+            *.apk)
+              cp "$PACKAGE_FILE" work/unpacked/base.apk
+              ;;
+            *)
+              if file "$PACKAGE_FILE" | grep -qi 'zip archive'; then
+                unzip -q "$PACKAGE_FILE" -d work/unpacked
+              else
+                echo "Unsupported downloaded format: $PACKAGE_FILE" >&2
+                exit 1
+              fi
+              ;;
+          esac
+
+          BASE_APK="$(find work/unpacked -type f -name '*.apk' -printf '%s %p\n'             | sort -nr | head -n1 | cut -d' ' -f2-)"
+          test -n "$BASE_APK"
+          echo "base_apk=$BASE_APK" >> "$GITHUB_OUTPUT"
+          echo "Selected base APK: $BASE_APK"
+          aapt dump badging "$BASE_APK" | head -n 5
+
+      - name: Decompile for static inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_APK="${{ steps.apk.outputs.base_apk }}"
+          mkdir -p work/jadx
+          jadx --show-bad-code --no-debug-info -d work/jadx "$BASE_APK" >/tmp/jadx.log 2>&1 || true
+          tail -n 80 /tmp/jadx.log > work/report/jadx.log
+
+      - name: Build compact forensic report
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_APK="${{ steps.apk.outputs.base_apk }}"
+          REPORT=work/report/report.md
+
+          SHA256="$(sha256sum "$BASE_APK" | awk '{print $1}')"
+          APK_SIZE="$(stat -c%s "$BASE_APK")"
+
+          {
+            echo "# PUB viewer competitor static analysis"
+            echo
+            echo "- Package target: \`$PACKAGE_ID\`"
+            echo "- Base APK: \`$BASE_APK\`"
+            echo "- Base APK size: \`$APK_SIZE bytes\`"
+            echo "- SHA-256: \`$SHA256\`"
+            echo
+            echo "## APK badging"
+            echo '~~~text'
+            aapt dump badging "$BASE_APK" | head -n 30
+            echo '~~~'
+            echo
+            echo "## Declared permissions"
+            echo '~~~text'
+            aapt dump permissions "$BASE_APK" || true
+            echo '~~~'
+            echo
+            echo "## Native libraries"
+            echo '~~~text'
+            unzip -l "$BASE_APK" | awk '{print $4}' | grep -E '^lib/.+\\.so$' | sort -u || true
+            echo '~~~'
+          } > "$REPORT"
+
+          ZIPLIST="$(unzip -l "$BASE_APK" | awk '{print $4}')"
+          FRAMEWORK="Native Android / undetermined"
+          if grep -q 'libflutter.so' <<<"$ZIPLIST"; then FRAMEWORK="Flutter"; fi
+          if grep -Eq 'libreactnativejni.so|index.android.bundle' <<<"$ZIPLIST"; then FRAMEWORK="React Native"; fi
+          if grep -Eq 'assets/www/|cordova.js' <<<"$ZIPLIST"; then FRAMEWORK="Cordova / WebView hybrid"; fi
+          if grep -q 'libunity.so' <<<"$ZIPLIST"; then FRAMEWORK="Unity"; fi
+          if grep -Eq 'libmonodroid.so|assemblies/' <<<"$ZIPLIST"; then FRAMEWORK="Xamarin / .NET Android"; fi
+
+          {
+            echo
+            echo "## Framework fingerprint"
+            echo
+            echo "**Detected:** $FRAMEWORK"
+            echo
+            echo "Relevant APK entries:"
+            echo '~~~text'
+            grep -E 'libflutter.so|libapp.so|libreactnativejni.so|index.android.bundle|assets/www/|cordova.js|libunity.so|libmonodroid.so|assemblies/' <<<"$ZIPLIST" | head -n 100 || true
+            echo '~~~'
+          } >> "$REPORT"
+
+          # Only collect ordinary URLs/domains. Do not collect keys, tokens or credentials.
+          python3 - <<'PY'
+          import pathlib, re
+          root = pathlib.Path("work/jadx")
+          urls = set()
+          pat = re.compile(r'https?://[^\s"\'<>\\)]+')
+          for p in root.rglob("*"):
+              if not p.is_file() or p.stat().st_size > 2_000_000:
+                  continue
+              try:
+                  text = p.read_text(errors="ignore")
+              except Exception:
+                  continue
+              for u in pat.findall(text):
+                  if len(u) <= 300:
+                      urls.add(u.rstrip(".,;"))
+          pathlib.Path("work/report/urls.txt").write_text("\n".join(sorted(urls)) + ("\n" if urls else ""))
+          PY
+
+          {
+            echo
+            echo "## Network endpoints / domains found in code"
+            echo '~~~text'
+            head -n 200 work/report/urls.txt || true
+            echo '~~~'
+            echo
+            echo "## PUB / conversion / upload implementation clues"
+            echo '~~~text'
+            rg -i -n --no-heading               'libmspub|mspub|publisher|\.pub|multipart|upload|convert|conversion|retrofit|okhttp|webview|preview|pdf|png|webp'               work/jadx/sources work/jadx/resources 2>/dev/null               | sed -E 's/[A-Za-z0-9_=-]{40,}/<REDACTED_LONG_TOKEN>/g'               | head -n 400 || true
+            echo '~~~'
+            echo
+            echo "## Native-code PUB engine fingerprints"
+            echo '~~~text'
+            for so in $(unzip -Z1 "$BASE_APK" | grep -E '^lib/.+\\.so$' || true); do
+              tmp="work/native/$(basename "$so")"
+              mkdir -p work/native
+              unzip -p "$BASE_APK" "$so" > "$tmp"
+              hits="$(strings "$tmp" | grep -Ei 'libmspub|mspub|publisher|libreoffice|uno|pub[0-9]?' | head -n 40 || true)"
+              if [ -n "$hits" ]; then
+                echo "### $so"
+                echo "$hits"
+              fi
+            done
+            echo '~~~'
+          } >> "$REPORT"
+
+          echo "Report written to $REPORT"
+          cat "$REPORT"
+
+      - name: Upload downloaded package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pub-viewer-package
+          path: work/download/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload static-analysis report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pub-viewer-analysis
+          path: work/report/
+          if-no-files-found: error
+          retention-days: 30
