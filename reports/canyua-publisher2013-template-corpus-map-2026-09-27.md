@@ -540,6 +540,127 @@ This further reduces the former pre-chunk opaque region from arbitrary bytes
 to path serialization + pointer/length-derived state + a small residual
 producer/environment-dependent pair.
 
+### Header provenance fields and build lineage
+
+The same 252-file pass also reduces the earlier opaque early-Contents header.
+
+For the bundled Publisher 2013 corpus:
+
+- `Contents+0x08` equals the complete `/Contents` stream length in **252/252** files.
+- `Contents+0x54` repeats that same stream length in **252/252** files.
+- `Contents+0x1A` is the trailer offset.
+- `Contents+0x1E` equals the pre-chunk outer-envelope start and is exactly `path_end + 40`.
+- `Contents+0x2C` equals `path_end - 4`.
+- `Contents+0x58` begins an `id=0x09/type=0xC0` variable-length UTF-16LE path block.
+- its length field at `+0x5A` is exactly `serialized_path_bytes + 4`.
+
+The byte variability of `Contents[0:94)` across all 252 templates is confined to
+the operating-system identifier, stream length, trailer offset, path-derived
+pointers, and path length. The remainder of that prefix is byte-stable within
+this corpus.
+
+#### Operating-system identifier
+
+`Contents+0x06` matches the low 16 bits of the OLEPS
+`DocumentSummaryInformation.SystemIdentifier` in **252 / 252** files.
+
+Observed profiles:
+
+- 251 files: Contents value `0x000A`; OLEPS SystemIdentifier `0x0002000A`.
+- 1 file (`Gift Certificates/Bars.pub`): Contents value `0x0206`; OLEPS
+  SystemIdentifier `0x00020206`.
+
+Microsoft's MS-OLEPS documentation identifies `0x0002000A` as the Windows 10
+profile and `0x00020206` as the Windows 8 profile. This upgrades
+`Contents+0x06` from an unexplained constant to a bounded producer-OS
+provenance carrier for the tested files.
+
+Reference:
+https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/0ad7dbc8-a93d-4b71-972c-d5f4ff01d0cf
+
+#### Application major-version mirror
+
+`Contents+0x22` and `Contents+0x24` both equal **15** in all 252 Publisher
+templates.
+
+The root `DocumentSummaryInformation` property `GKPIDDSI_VERSION (0x17)`
+is `0x000F0000` in all 252 files. Microsoft documents this property as the
+version of the application that wrote the property-set storage, with the
+high-order 16 bits carrying the application major version.
+
+Therefore:
+
+```text
+Contents+0x22 == Contents+0x24 == GKPIDDSI_VERSION.major == 15
+```
+
+on **252 / 252** files.
+
+Reference:
+https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-oshared/3ef02e83-afef-4b6c-9585-c109edd24e07
+
+The bundled Canyua `Contents.dat` seed instead stores **12** at both header
+locations. Its post-path build-like fields are **4518**. That pair lines up
+exactly with the published Office/Publisher 2007 RTM version
+`12.0.4518.1014`.
+
+The real Publisher 2013 corpus stores major **15** and predominantly build-like
+value **5579**. Microsoft Office 2013 update binaries are published with version
+`15.0.5579.1001`. The single Bars outlier carries **4420** in two of the four
+build-like slots, matching Office 2013 RTM `15.0.4420.1017`.
+
+References:
+- Office/Publisher 2007 RTM `12.0.4518.1014`:
+  https://userapps.support.sap.com/sap/support/knowledge/en/1378580
+- Office 2013 RTM `15.0.4420.1017`:
+  https://learn.microsoft.com/en-us/answers/questions/4801530/help-%28f1%29-wont-install-in-office-2013-x64
+- Office 2013 `15.0.5579.1001`:
+  https://support.microsoft.com/en-us/topic/description-of-the-security-update-for-office-2013-august-8-2023-kb5002439-f44d9e22-b020-496e-9f21-baa34d4f352e
+
+This numeric correspondence is strong provenance evidence, but the four
+post-path fields are not yet assigned final names. In particular Bars has:
+
+```text
+0D = 4420
+0E = 5579
+0F = 4420
+10 = 5579
+```
+
+while the other 251 templates have `5579` in all four slots and the Canyua
+seed has `4518` in all four slots.
+
+A plausible model is an original-writer / later-writer build pair duplicated
+across two header projections, but that interpretation remains a hypothesis
+until a controlled SaveAs/build transition changes the slots causally.
+
+#### Physical pre-chunk grammar now known
+
+For the tested mature-`0x2C` Publisher 2013 corpus the pre-chunk layout can
+now be described physically as:
+
+```text
+fixed signature/version header
++ OS provenance mirror
++ stream-size / trailer / path-derived pointers
++ application-major mirrors
++ fixed header blocks
++ 09/C0 UTF-16LE save-path block
++ 0A/B8 trailer pointer
++ 0B/B8 outer-envelope pointer
++ 0C/18 = 1
++ four build-lineage candidate fields
++ outer length
++ 01/20 = 143
++ 02/20 fixed profile code
++ 03/90 fixed 143-entry table
+= first directory-addressed content chunk
+```
+
+That is materially narrower than the previous `Contents[30,94)` plus
+post-path `UNKNOWN_REQUIRED` classification. Semantic names remain bounded to
+the fields independently cross-checked against OLEPS/Office version metadata.
+
 ### Zero-seed consequence and claim boundary
 
 This materially narrows Chaptera's zero-seed problem, but does **not** justify
