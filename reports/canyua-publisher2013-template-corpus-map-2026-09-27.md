@@ -201,6 +201,85 @@ This matters because static analysis found a method named
 `SetSummaryTail`. The method name plus scattered corpus overlap is suggestive,
 but the exact writer policy still requires dynamic Canyua output.
 
+## Contents 0x2C: universal pre-chunk table
+
+A structural pass over the same 252 `/Contents` streams sharpens the
+3712-byte scaffold result considerably.
+
+Using the public libmspub physical block framing rules for the 0x2C family,
+every analyzed file has the same high-level relationship:
+
+```text
+Contents header / prelude
+        |
+        +-- id=0x03, type=0x90 variable container
+        |      |
+        |      +-- 143 x type=0x88 GeneralContainer entries
+        |             internal id=0x01/type=0x18 values: 1..143
+        |
+        +-- container end == first referenced content-chunk offset
+               |
+               v
+          generated/document chunks
+               |
+               v
+          trailer / chunk-reference directory
+```
+
+Corpus invariants:
+
+- analyzable as this 0x2C structure: **252 / 252**;
+- final pre-chunk block is the table above: **252 / 252**;
+- that table ends exactly at the first content chunk: **252 / 252**;
+- child count is exactly **143** in every file;
+- the child containers use the sequential inner index `1..143` with no
+  gaps: **252 / 252**;
+- the universal 3712-byte scaffold is inside this table: **252 / 252**;
+- its start is always exactly **14 bytes after the table start**.
+
+The seed therefore has:
+
+```text
+table start:     0x00F2
+scaffold start:  0x0100
+delta:           0x000E
+scaffold end:    0x0F80
+table end:       0x1030
+first chunk:     0x1030
+```
+
+The target absolute offsets move between real templates, but these internal
+relationships do not.
+
+The 143 entries are highly regular. In the seed, each one is a
+`type=0x88` container and its `id=0x01/type=0x18` value is the exact
+1-based entry number. Other recurring physical fields use only a small number
+of schemas and values. This is strong evidence for a fixed indexed preset /
+default table, but **the semantic name of the table remains unassigned** until
+independent evidence identifies what those 143 entries represent.
+
+### Writer-side consequence
+
+Static disassembly of `libpubBuilder.so` independently shows why this table
+survives.
+
+`MSPUB::Contents::BeginDocument` reads the seed trailer directory and keeps
+the first referenced `CHUNK_OFFSET`. For the bundled blank seed that offset
+is `0x1030`.
+
+`MSPUB::Contents::Build` copies the template bytes up to that first-chunk
+boundary, performs targeted early-header patching through `BuildHead`, then
+seeks to the first-chunk offset and emits rebuilt content chunks and a rebuilt
+chunk-reference/trailer area.
+
+The observed `BuildHead` writes are in the early header, before the universal
+table scaffold. Therefore the `0x100:0xF80` scaffold is not merely
+byte-similar to writer output: in this writer profile it lies in the explicit
+template-copy region and outside the observed patch coordinates.
+
+This is the strongest current evidence for **template-seeded Contents
+construction**.
+
 ## What this changes in the writer model
 
 Before this corpus pass, template seeding was established from the writer API
