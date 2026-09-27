@@ -77,6 +77,54 @@ def common_suffix(a: bytes, b: bytes) -> int:
     return i
 
 
+def seed_block_matches(seed: bytes, actual: bytes, block_size: int = 64) -> dict:
+    """Measure exact seed blocks that survive anywhere in the target stream.
+
+    Blocks are sampled at non-overlapping seed offsets. This is relocation-aware:
+    a block counts even when it moved to a different stream offset. The metric is
+    physical evidence only and must not be promoted to semantic attribution.
+    """
+    total = len(seed) // block_size
+    if total == 0:
+        return {
+            "block_size": block_size,
+            "total_blocks": 0,
+            "matched_blocks": 0,
+            "matched_pct": 0.0,
+            "longest_same_delta_run_bytes": 0,
+        }
+
+    matches = []
+    for seed_offset in range(0, total * block_size, block_size):
+        block = seed[seed_offset:seed_offset + block_size]
+        actual_offset = actual.find(block)
+        if actual_offset >= 0:
+            matches.append((seed_offset, actual_offset, actual_offset - seed_offset))
+
+    best_run_blocks = 0
+    run_blocks = 0
+    previous = None
+    for item in matches:
+        if (
+            previous is not None
+            and item[0] == previous[0] + block_size
+            and item[2] == previous[2]
+        ):
+            run_blocks += 1
+        else:
+            run_blocks = 1
+        best_run_blocks = max(best_run_blocks, run_blocks)
+        previous = item
+
+    return {
+        "block_size": block_size,
+        "total_blocks": total,
+        "matched_blocks": len(matches),
+        "matched_pct": round(100.0 * len(matches) / total, 2),
+        "longest_same_delta_run_bytes": best_run_blocks * block_size,
+    }
+
+
 def stats(values: Iterable[int]) -> dict:
     vals = sorted(values)
     if not vals:
@@ -192,6 +240,7 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
                     continue
                 actual = streams[target]
                 seed_blob = seed["bytes"]
+                block_match = seed_block_matches(seed_blob, actual)
                 seed_similarity[seed_name].append({
                     "template": pub_path,
                     "stream_len": len(actual),
@@ -199,6 +248,7 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
                     "exact": actual == seed_blob,
                     "common_prefix": common_prefix(seed_blob, actual),
                     "common_suffix": common_suffix(seed_blob, actual),
+                    **block_match,
                 })
 
             rows.append(row)
@@ -229,6 +279,31 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
             "exact_matches": sum(1 for x in items if x["exact"]),
             "best_common_prefix": by_prefix[:10],
             "best_common_suffix": by_suffix[:10],
+            "block_match": {
+                "block_size": items[0]["block_size"] if items else 64,
+                "matched_pct": stats(int(round(x["matched_pct"] * 100)) for x in items),
+                "matched_blocks": stats(x["matched_blocks"] for x in items),
+                "longest_same_delta_run_bytes": stats(
+                    x["longest_same_delta_run_bytes"] for x in items
+                ),
+                "best_templates": sorted(
+                    (
+                        {
+                            "template": x["template"],
+                            "matched_blocks": x["matched_blocks"],
+                            "total_blocks": x["total_blocks"],
+                            "matched_pct": x["matched_pct"],
+                            "longest_same_delta_run_bytes": x["longest_same_delta_run_bytes"],
+                        }
+                        for x in items
+                    ),
+                    key=lambda x: (
+                        x["matched_pct"],
+                        x["longest_same_delta_run_bytes"],
+                    ),
+                    reverse=True,
+                )[:10],
+            },
         }
 
     duplicate_whole_files = [
@@ -317,7 +392,9 @@ def write_summary(path: Path, report: dict) -> None:
             f"- **{seed}**: seed_len={info['seed_len']}, "
             f"stream_present={info['templates_with_stream']}, "
             f"exact_matches={info['exact_matches']}, "
-            f"best_prefix={best['common_prefix'] if best else None}"
+            f"best_prefix={best['common_prefix'] if best else None}, "
+            f"best_suffix={info['best_common_suffix'][0]['common_suffix'] if info['best_common_suffix'] else None}, "
+            f"best_64B_block_match={info['block_match']['best_templates'][0]['matched_pct'] if info['block_match']['best_templates'] else None}%"
         )
     lines += [
         "",
