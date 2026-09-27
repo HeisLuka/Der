@@ -11,6 +11,9 @@ application and do not copy proprietary implementation code.
 
 Static analysis already established that Canyua has a native writer that builds
 Contents, Quill, Escher, EscherDelayStm and summary streams from template seeds.
+A 252-file Publisher 2013 corpus bundled with the app independently shows the
+Quill data stream at `/Quill/QuillSub/CONTENTS`; tools must use that observed
+path rather than the earlier shorthand `/Quill/CONTENTS`.
 Static symbols do not tell us which physical records change for one semantic
 operation. Controlled before/after files can.
 
@@ -99,7 +102,7 @@ save #1 -> save #2              = nondeterminism test
 
 The first high-value result is a matrix:
 
-| operation | Contents | Quill/CONTENTS | EscherStm | EscherDelayStm | summary |
+| operation | Contents | Quill/QuillSub/CONTENTS | EscherStm | EscherDelayStm | summary |
 |---|---|---|---|---|---|
 | resave-control | ? | ? | ? | ? | ? |
 | text A→B | ? | ? | ? | ? | ? |
