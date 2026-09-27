@@ -280,6 +280,83 @@ template-copy region and outside the observed patch coordinates.
 This is the strongest current evidence for **template-seeded Contents
 construction**.
 
+## Entry-level variability: the table is fully corpus-invariant
+
+A dedicated per-entry pass over all 143 table entries across all 252 templates
+produced a stronger result than the earlier 3712-byte window.
+
+Evidence workflow:
+
+- `.github/workflows/canyua-prechunk-table.yml`
+- analyzer: `experiments/analyze-canyua-prechunk-table.py`
+- successful run: `36307392333`
+- artifact: `canyua-contents-prechunk-variability` / `10927352588`
+
+Result:
+
+- **143 / 143 entries are byte-invariant across all 252 Publisher templates**;
+- **142 / 143 entries are also byte-identical to the Canyua blank
+  `Contents.dat` seed**;
+- the only seed-vs-corpus difference is **entry 139**;
+- there are **zero document-dependent entry variants** in this table.
+
+Exact seed-identical entry ranges:
+
+```text
+1-138
+140-143
+```
+
+### Entry 139: the only seed-profile difference
+
+The seed entry is 28 bytes. The corresponding entry in all 252 Publisher 2013
+templates is 32 bytes.
+
+Fields shared by both forms:
+
+```text
+id=0x01 type=0x18 value=139
+id=0x03 type=0x20 value=65536020
+id=0x08 type=0x08
+id=0x09 type=0x10 value=1
+id=0x0C type=0x20 value=5
+```
+
+The Publisher-template corpus form contains two additional zero-length blocks
+before `id=0x08`:
+
+```text
+id=0x06 type=0x08
+id=0x07 type=0x08
+```
+
+So the physical difference is exactly four bytes of block headers:
+
+```text
+seed profile:
+  01/18, 03/20,         08/08, 09/10, 0C/20
+
+252-template profile:
+  01/18, 03/20, 06/08, 07/08, 08/08, 09/10, 0C/20
+```
+
+No semantic meaning is assigned to the two flags yet.
+
+### Consequence for the Canyua writer fingerprint
+
+The static writer path copies the pre-content-chunk seed region and the
+observed `BuildHead` patches are confined to the early header, not entry 139.
+Therefore the current evidence predicts that a PUB newly emitted by this
+Canyua writer should retain the **28-byte seed form of entry 139**, while every
+one of the 252 bundled Publisher 2013 templates carries the **32-byte form**.
+
+This is a **candidate behavioral fingerprint**, not yet a dynamic fact. It
+becomes confirmed only when a legitimately produced Canyua output is captured
+and inspected.
+
+The useful point is that the dynamic test no longer needs to begin with a
+whole-file diff: entry 139 gives a precise first discriminator to check.
+
 ## What this changes in the writer model
 
 Before this corpus pass, template seeding was established from the writer API
