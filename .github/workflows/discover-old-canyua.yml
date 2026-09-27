@@ -13,71 +13,163 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Query Aptoide public version API
+      - name: Query Aptoide app metadata with versions node
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p work
-          VERSIONS='https://ws75.aptoide.com/api/7/listAppVersions?package_name=com.canyua.publisherexpert&limit=100'
-          curl -L --fail --compressed "$VERSIONS" -o work/versions.json
+          BASE='https://ws75.aptoide.com/api/7/app/get'
+          URL="$BASE/package_name=com.canyua.publisherexpert/nodes=meta,versions"
+          echo "$URL" | tee work/query-url.txt
+          curl -A 'Mozilla/5.0' -L --fail --compressed "$URL" -o work/app-get.json
+
           python3 - <<'PY'
           import json
           from pathlib import Path
-          data=json.loads(Path("work/versions.json").read_text())
-          items=((data.get("datalist") or {}).get("list") or [])
-          for x in items:
-              f=x.get("file") or {}
-              print(f.get("vername"), f.get("vercode"), f.get("md5sum"), f.get("path"), f.get("filesize") or f.get("size"))
-          target=next((x for x in items if (x.get("file") or {}).get("vername")=="3.1.10"), None)
-          if not target:
-              raise SystemExit("3.1.10 not present in Aptoide version API")
-          f=target["file"]
-          Path("work/target.json").write_text(json.dumps({
-              "vername":f.get("vername"),
-              "vercode":f.get("vercode"),
-              "md5sum":f.get("md5sum"),
-              "path":f.get("path"),
-              "size":f.get("filesize") or f.get("size"),
-              "signature":f.get("signature"),
-          }, indent=2)+"\n")
-          print("--- target ---")
-          print(Path("work/target.json").read_text())
+
+          data=json.loads(Path("work/app-get.json").read_text())
+          rows=[]
+
+          def walk(node, trail="root"):
+              if isinstance(node, dict):
+                  if "vername" in node:
+                      rows.append({
+                          "trail": trail,
+                          "vername": node.get("vername"),
+                          "vercode": node.get("vercode"),
+                          "md5sum": node.get("md5sum"),
+                          "path": node.get("path"),
+                          "filesize": node.get("filesize") or node.get("size"),
+                          "signature": node.get("signature"),
+                      })
+                  for k,v in node.items():
+                      walk(v, trail+"."+str(k))
+              elif isinstance(node, list):
+                  for i,v in enumerate(node):
+                      walk(v, trail+f"[{i}]")
+
+          walk(data)
+
+          dedup={}
+          for row in rows:
+              key=(str(row.get("vername")), str(row.get("vercode")), str(row.get("path")))
+              dedup[key]=row
+          rows=list(dedup.values())
+
+          def vkey(row):
+              text=str(row.get("vername") or "")
+              parts=[]
+              for piece in text.replace("-", ".").split("."):
+                  try:
+                      parts.append(int(piece))
+                  except ValueError:
+                      parts.append(-1)
+              return tuple(parts)
+
+          rows.sort(key=vkey, reverse=True)
+          Path("work/version-candidates.json").write_text(
+              json.dumps(rows, indent=2, ensure_ascii=False)+"\n"
+          )
+
+          print("Aptoide status:", (data.get("info") or {}).get("status"))
+          print("version candidates:", len(rows))
+          for row in rows:
+              print(row.get("vername"), row.get("vercode"), row.get("filesize"), row.get("path"))
+
+          target=next((r for r in rows if str(r.get("vername"))=="3.1.10" and r.get("path")), None)
+          if target is None:
+              older=[r for r in rows if r.get("path") and vkey(r) < (5,1,1)]
+              target=older[-1] if older else None
+
+          if target:
+              Path("work/target.json").write_text(
+                  json.dumps(target, indent=2, ensure_ascii=False)+"\n"
+              )
+              print("--- selected target ---")
+              print(Path("work/target.json").read_text())
+          else:
+              print("No downloadable historical target found in app/get response")
           PY
 
-      - name: Download target and inspect protection markers
+      - name: Download selected historical APK
+        if: \${{ hashFiles('work/target.json') != '' }}
         shell: bash
         run: |
           set -euo pipefail
           URL="$(python3 -c 'import json; print(json.load(open("work/target.json"))["path"])')"
-          curl -L --fail --retry 3 "$URL" -o work/canyua-3.1.10.apk
-          sha256sum work/canyua-3.1.10.apk | tee work/sha256.txt
-          unzip -Z1 work/canyua-3.1.10.apk | grep -Ei 'pairip|licensecheck|libmspub|libpubBuilder|\.so$' | head -n 300 | tee work/markers.txt || true
+          curl -A 'Mozilla/5.0' -L --fail --retry 3 --connect-timeout 20 "$URL" -o work/canyua-old.apk
+          sha256sum work/canyua-old.apk | tee work/sha256.txt
+          file work/canyua-old.apk | tee work/file.txt
+          unzip -t work/canyua-old.apk >/dev/null
+
+      - name: Inspect ABI and protection markers
+        if: \${{ hashFiles('work/canyua-old.apk') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -Z1 work/canyua-old.apk | grep -E '^lib/[^/]+/[^/]+\.so$' | sort | tee work/native-files.txt || true
+          unzip -Z1 work/canyua-old.apk | grep -Ei 'pairip|licensecheck|libmspub|libpubBuilder|Publisher Data|\.so$' | sort | tee work/interesting-files.txt || true
+
           python3 - <<'PY'
-          import zipfile, re
-          z=zipfile.ZipFile("work/canyua-3.1.10.apk")
-          hits=[]
-          for name in z.namelist():
-              if not (name.endswith(".dex") or name=="AndroidManifest.xml"):
+          import json, zipfile
+          from pathlib import Path
+
+          apk=Path("work/canyua-old.apk")
+          z=zipfile.ZipFile(apk)
+          names=z.namelist()
+
+          abis=sorted({name.split("/")[1] for name in names if name.startswith("lib/") and name.count("/") >= 2})
+          native=[name for name in names if name.startswith("lib/") and name.endswith(".so")]
+
+          marker_needles={
+              "pairip": [b"com/pairip", b"com.pairip", b"licensecheck", b"LicenseActivity"],
+              "mspub": [b"libmspub", b"mspubCore", b"MSPUBDocument"],
+              "writer": [b"libpubBuilder", b"createPub", b"MSPUBBuilder"],
+          }
+          hits={k:[] for k in marker_needles}
+
+          scan_names=[n for n in names if n.endswith(".dex") or n=="AndroidManifest.xml" or n.endswith(".so")]
+          for name in scan_names:
+              try:
+                  blob=z.read(name)
+              except Exception:
                   continue
-              b=z.read(name)
-              for pat in [b"com/pairip",b"licensecheck",b"libmspub",b"pubBuilder"]:
-                  if pat.lower() in b.lower():
-                      hits.append((name,pat.decode()))
-          print("binary marker hits:",hits)
-          open("work/binary-markers.txt","w").write(repr(hits)+"\n")
+              low=blob.lower()
+              for group, needles in marker_needles.items():
+                  for needle in needles:
+                      if needle.lower() in low:
+                          hits[group].append({"file":name,"needle":needle.decode("ascii","replace")})
+
+          report={
+              "schema":"der/canyua-old-apk-inspection/v1",
+              "target":json.loads(Path("work/target.json").read_text()),
+              "abis":abis,
+              "native_library_count":len(native),
+              "native_libraries":native,
+              "marker_hits":hits,
+          }
+          Path("work/inspection.json").write_text(
+              json.dumps(report, indent=2, ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(report, indent=2, ensure_ascii=False))
           PY
 
-      - name: Upload metadata only
+      - name: Upload discovery evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: old-canyua-discovery-metadata
           path: |
-            work/versions.json
+            work/query-url.txt
+            work/app-get.json
+            work/version-candidates.json
             work/target.json
             work/sha256.txt
-            work/markers.txt
-            work/binary-markers.txt
-          if-no-files-found: error
+            work/file.txt
+            work/native-files.txt
+            work/interesting-files.txt
+            work/inspection.json
+          if-no-files-found: warn
           retention-days: 30
