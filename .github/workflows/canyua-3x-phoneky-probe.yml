@@ -1,0 +1,182 @@
+name: Probe Canyua 3.1.35 public package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/canyua-3x-phoneky-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch public Phoneky package page
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/candidates
+          PAGE='https://ff.phoneky.com/android/?id=d1d262450'
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36'
+          curl -A "$UA" -L --compressed --fail             -c work/cookies.txt -b work/cookies.txt             "$PAGE" -o work/page.html
+          printf '%s\n' "$PAGE" > work/page-url.txt
+
+          python3 - <<'PY'
+          import html, re
+          from pathlib import Path
+          from urllib.parse import urljoin
+
+          base=Path("work/page-url.txt").read_text().strip()
+          text=Path("work/page.html").read_text(errors="replace")
+          urls=set()
+
+          patterns=[
+              r'''href=["']([^"']+)["']''',
+              r'''action=["']([^"']+)["']''',
+              r'''data-[a-zA-Z0-9_-]+=["']([^"']+)["']''',
+          ]
+          for pattern in patterns:
+              for raw in re.findall(pattern, text, flags=re.I):
+                  raw=html.unescape(raw)
+                  full=urljoin(base, raw)
+                  low=full.lower()
+                  if any(k in low for k in (
+                      "download", ".apk", ".xapk", "d1d262450",
+                      "262450", "android", "phoneky",
+                  )):
+                      urls.add(full)
+
+          ranked=sorted(
+              urls,
+              key=lambda u: (
+                  -sum(
+                      weight
+                      for token,weight in (
+                          (".apk",100),(".xapk",100),("download",60),
+                          ("262450",30),("d1d262450",30)
+                      )
+                      if token in u.lower()
+                  ),
+                  u,
+              ),
+          )
+          Path("work/candidate-urls.txt").write_text("\n".join(ranked)+"\n")
+          print("candidate urls:", len(ranked))
+          for u in ranked[:50]:
+              print(u)
+          PY
+
+      - name: Try normal public download candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36'
+          PAGE="$(cat work/page-url.txt)"
+          : > work/results.tsv
+          i=0
+          while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            i=$((i+1))
+            [ "$i" -le 40 ] || break
+            out="work/candidates/$i.bin"
+            hdr="work/candidates/$i.headers"
+            code="$(curl -A "$UA" -e "$PAGE" -L --compressed -sS               -c work/cookies.txt -b work/cookies.txt               -D "$hdr" -o "$out" -w '%{http_code}' "$url" || true)"
+            bytes="$(stat -c %s "$out" 2>/dev/null || printf 0)"
+            magic="$(xxd -p -l 4 "$out" 2>/dev/null || true)"
+            ctype="$(grep -i '^content-type:' "$hdr" | tail -n1 | tr -d '\r' | cut -d: -f2- | xargs || true)"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n'               "$i" "$code" "$bytes" "$magic" "$ctype" "$url" >> work/results.tsv
+            if [ "$magic" = "504b0304" ] && [ "$bytes" -gt 10000000 ]; then
+              cp "$out" work/canyua-3.1.35.apk
+              printf '%s\n' "$url" > work/selected-url.txt
+              break
+            fi
+          done < work/candidate-urls.txt
+          cat work/results.tsv
+
+      - name: Inspect APK when found
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f work/canyua-3.1.35.apk ]; then
+            echo "No APK obtained through normal public page flow." | tee work/verdict.txt
+            exit 0
+          fi
+
+          sha256sum work/canyua-3.1.35.apk | tee work/sha256.txt
+          unzip -t work/canyua-3.1.35.apk >/dev/null
+
+          python3 - <<'PY'
+          import json, zipfile
+          from pathlib import Path
+
+          p=Path("work/canyua-3.1.35.apk")
+          z=zipfile.ZipFile(p)
+          names=z.namelist()
+          abis=sorted({n.split("/")[1] for n in names if n.startswith("lib/") and n.count("/") >= 2})
+          native=[n for n in names if n.startswith("lib/") and n.endswith(".so")]
+          needles={
+              "pairip":[b"com/pairip",b"com.pairip",b"licensecheck",b"LicenseActivity"],
+              "reader":[b"mspubCore",b"MSPUBDocument",b"libmspub"],
+              "writer":[b"libpubBuilder",b"MSPUBBuilder",b"createPub"],
+          }
+          hits={k:[] for k in needles}
+          for name in [n for n in names if n.endswith(".dex") or n=="AndroidManifest.xml" or n.endswith(".so")]:
+              try:
+                  blob=z.read(name).lower()
+              except Exception:
+                  continue
+              for group,pats in needles.items():
+                  for pat in pats:
+                      if pat.lower() in blob:
+                          hits[group].append({"file":name,"needle":pat.decode("ascii","replace")})
+          report={
+              "schema":"der/canyua-3.1.35-phoneky-probe/v1",
+              "bytes":p.stat().st_size,
+              "abis":abis,
+              "native_library_count":len(native),
+              "native_libraries":native,
+              "marker_hits":hits,
+              "pairip_present":bool(hits["pairip"]),
+              "reader_present":bool(hits["reader"]),
+              "writer_present":bool(hits["writer"]),
+          }
+          Path("work/report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n")
+          Path("work/verdict.txt").write_text(
+              f"pairip_present={report['pairip_present']}\n"
+              f"reader={report['reader_present']}\n"
+              f"writer={report['writer_present']}\n"
+              f"abis={','.join(abis)}\n"
+          )
+          print(json.dumps(report,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.35-phoneky-probe
+          path: |
+            work/page-url.txt
+            work/page.html
+            work/candidate-urls.txt
+            work/results.tsv
+            work/candidates/*.headers
+            work/selected-url.txt
+            work/sha256.txt
+            work/report.json
+            work/verdict.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload runnable package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.35-package
+          path: work/canyua-3.1.35.apk
+          if-no-files-found: ignore
+          retention-days: 7
