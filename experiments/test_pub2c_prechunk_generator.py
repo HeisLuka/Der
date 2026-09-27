@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import struct
+import sys
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ MODULE_PATH = Path(__file__).with_name("generate-pub2c-prechunk.py")
 SPEC = importlib.util.spec_from_file_location("pub2c_prechunk", MODULE_PATH)
 assert SPEC and SPEC.loader
 m = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = m
 SPEC.loader.exec_module(m)
 
 EXPECTED_TABLE_SHA256 = "d21025e0e5324f0cf1312bff15d11ce7afa2e699ac5869e093a550b9e445fc81"
