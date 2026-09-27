@@ -40,7 +40,7 @@ SEEDS = {
     ),
     "quill": (
         "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/QUILL_CONTENTS.dat",
-        "/Quill/CONTENTS",
+        "/Quill/QuillSub/CONTENTS",
     ),
     "summary": (
         "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/SummaryInformation.dat",
@@ -49,7 +49,7 @@ SEEDS = {
 }
 KEY_PATHS = {
     "/Contents": "contents",
-    "/Quill/CONTENTS": "quill",
+    "/Quill/QuillSub/CONTENTS": "quill",
     "/Escher/EscherStm": "escher",
     "/Escher/EscherDelayStm": "escher_delay",
     "/\x05SummaryInformation": "summary",
