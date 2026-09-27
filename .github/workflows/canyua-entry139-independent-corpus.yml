@@ -1,0 +1,113 @@
+name: Check entry-139 against independent Publisher corpus
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/canyua-entry139-independent-corpus.yml"
+      - "experiments/probe-canyua-contents-profile.py"
+      - "experiments/analyze-canyua-prechunk-table.py"
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install OLE parser
+        run: python3 -m pip install --disable-pip-version-check olefile
+
+      - name: Download public independent Publisher templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/zips work/pubs work/results
+          cat > work/sources.tsv <<'EOF'
+          A014	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2020/09/A014_Gemeindebriefvorlage_publisher.zip
+          A007	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a007_publisher.zip
+          A006	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a006_publisher.zip
+          A005	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a005_publisher.zip
+          A004	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a004_publisher.zip
+          A003	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a003_publisher.zip
+          A002	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a002_publisher.zip
+          A001	https://helfer.gemeindebriefdruckerei.de/wp-content/uploads/2016/12/gemeindebriefvorlage_a001_publisher.zip
+          EOF
+
+          : > work/downloads.tsv
+          while IFS=$'\t' read -r id url; do
+            zip="work/zips/$id.zip"
+            code="$(curl -A 'Mozilla/5.0' -L --compressed -sS \
+              -o "$zip" -w '%{http_code}' "$url" || true)"
+            bytes="$(stat -c %s "$zip" 2>/dev/null || printf 0)"
+            printf '%s\t%s\t%s\t%s\n' "$id" "$code" "$bytes" "$url" \
+              | tee -a work/downloads.tsv
+            [ "$code" = "200" ] || continue
+            unzip -t "$zip" >/dev/null 2>&1 || continue
+            entry="$(unzip -Z1 "$zip" | grep -Ei '\.pub$' | head -n 1 || true)"
+            [ -n "$entry" ] || continue
+            unzip -p "$zip" "$entry" > "work/pubs/$id.pub"
+          done < work/sources.tsv
+
+          echo "PUB files:"
+          ls -lh work/pubs || true
+          test "$(find work/pubs -type f -name '*.pub' | wc -l)" -ge 1
+
+      - name: Classify entry 139
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pub in work/pubs/*.pub; do
+            id="$(basename "$pub" .pub)"
+            python3 experiments/probe-canyua-contents-profile.py \
+              --pub "$pub" \
+              --json "work/results/$id.json"
+          done
+
+          python3 - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          rows=[]
+          for path in sorted(Path("work/results").glob("*.json")):
+              data=json.loads(path.read_text())
+              rows.append({
+                  "id": path.stem,
+                  "profile": data["profile"],
+                  "entry_len": data["entry_len"],
+                  "entry_sha256": data["entry_sha256"],
+                  "fields": data["fields"],
+              })
+
+          counts=Counter(row["profile"] for row in rows)
+          report={
+              "schema":"der/canyua-entry139-independent-corpus/v1",
+              "source_page":"https://helfer.gemeindebriefdruckerei.de/downloads/gestaltungsvorlagen/layoutvorlagen-fuer-gemeindebriefe/",
+              "sample_count":len(rows),
+              "profile_counts":dict(sorted(counts.items())),
+              "samples":rows,
+              "boundary":"Public third-party Publisher templates; no source PUB bytes are retained in the artifact.",
+          }
+          Path("work/report.json").write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(report,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Upload evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-entry139-independent-corpus
+          path: |
+            work/sources.tsv
+            work/downloads.tsv
+            work/results/*.json
+            work/report.json
+          if-no-files-found: warn
+          retention-days: 30
