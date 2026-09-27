@@ -1,0 +1,29 @@
+name: PUB 0x2C pre-chunk generator
+
+on:
+  push:
+    paths:
+      - "experiments/generate-pub2c-prechunk.py"
+      - "experiments/test_pub2c_prechunk_generator.py"
+      - ".github/workflows/pub2c-prechunk-generator.yml"
+  pull_request:
+    paths:
+      - "experiments/generate-pub2c-prechunk.py"
+      - "experiments/test_pub2c_prechunk_generator.py"
+      - ".github/workflows/pub2c-prechunk-generator.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metamorphic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run generator metamorphic tests
+        run: python experiments/test_pub2c_prechunk_generator.py
