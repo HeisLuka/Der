@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Analyze the 252 Publisher templates bundled with Canyua.
+
+This is corpus/provenance analysis only. It does not infer semantic field
+meaning from byte coincidences.
+
+Dependency:
+    python -m pip install olefile
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import io
+import json
+import statistics
+import sys
+import zipfile
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+try:
+    import olefile  # type: ignore
+except ImportError as exc:
+    raise SystemExit("Missing dependency: python -m pip install olefile") from exc
+
+SCHEMA = "der/canyua-template-corpus/v1"
+TEMPLATE_PREFIX = "assets/Publisher Templates/2013/BUILT-IN/"
+SEEDS = {
+    "contents": (
+        "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/Contents.dat",
+        "/Contents",
+    ),
+    "escher": (
+        "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/EscherStm.dat",
+        "/Escher/EscherStm",
+    ),
+    "quill": (
+        "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/QUILL_CONTENTS.dat",
+        "/Quill/CONTENTS",
+    ),
+    "summary": (
+        "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/SummaryInformation.dat",
+        "/\x05SummaryInformation",
+    ),
+}
+KEY_PATHS = {
+    "/Contents": "contents",
+    "/Quill/CONTENTS": "quill",
+    "/Escher/EscherStm": "escher",
+    "/Escher/EscherDelayStm": "escher_delay",
+    "/\x05SummaryInformation": "summary",
+    "/\x05DocumentSummaryInformation": "document_summary",
+}
+
+
+def h(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def common_prefix(a: bytes, b: bytes) -> int:
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
+def common_suffix(a: bytes, b: bytes) -> int:
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[len(a) - 1 - i] == b[len(b) - 1 - i]:
+        i += 1
+    return i
+
+
+def stats(values: Iterable[int]) -> dict:
+    vals = sorted(values)
+    if not vals:
+        return {"count": 0}
+    return {
+        "count": len(vals),
+        "min": vals[0],
+        "median": statistics.median(vals),
+        "mean": round(statistics.fmean(vals), 2),
+        "max": vals[-1],
+    }
+
+
+def parse_pub(blob: bytes) -> Tuple[List[str], Dict[str, bytes]]:
+    if not olefile.isOleFile(io.BytesIO(blob)):
+        raise ValueError("not an OLE/CFB file")
+    streams: Dict[str, bytes] = {}
+    with olefile.OleFileIO(io.BytesIO(blob)) as ole:
+        for parts in ole.listdir(streams=True, storages=False):
+            path = "/" + "/".join(parts)
+            streams[path] = ole.openstream(parts).read()
+    return sorted(streams), streams
+
+
+def category_of(path: str) -> Tuple[str, str]:
+    rel = path[len(TEMPLATE_PREFIX):]
+    parts = rel.split("/")
+    level1 = parts[0] if len(parts) > 1 else ""
+    level2 = parts[1] if len(parts) > 2 else ""
+    return level1, level2
+
+
+def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
+    with zipfile.ZipFile(apk_path) as apk:
+        names = apk.namelist()
+        pubs = sorted(
+            n for n in names
+            if n.startswith(TEMPLATE_PREFIX) and n.lower().endswith(".pub")
+        )
+        if not pubs:
+            raise SystemExit("No Publisher templates found in base APK")
+
+        seed_bytes = {}
+        for name, (zip_path, expected_stream) in SEEDS.items():
+            seed_bytes[name] = {
+                "zip_path": zip_path,
+                "expected_stream": expected_stream,
+                "bytes": apk.read(zip_path),
+            }
+
+        presence = Counter()
+        stream_set_clusters = Counter()
+        whole_hashes = Counter()
+        key_hashes = defaultdict(Counter)
+        key_sizes = defaultdict(list)
+        categories = Counter()
+        parse_errors = []
+        rows: List[dict] = []
+        stream_rows: List[dict] = []
+        seed_similarity = defaultdict(list)
+
+        for index, pub_path in enumerate(pubs, 1):
+            blob = apk.read(pub_path)
+            pub_hash = h(blob)
+            whole_hashes[pub_hash] += 1
+            level1, level2 = category_of(pub_path)
+            categories[(level1, level2)] += 1
+
+            try:
+                stream_paths, streams = parse_pub(blob)
+            except Exception as exc:
+                parse_errors.append({"path": pub_path, "error": repr(exc)})
+                continue
+
+            for path in stream_paths:
+                presence[path] += 1
+
+            signature_text = "\n".join(stream_paths).encode()
+            signature = h(signature_text)
+            stream_set_clusters[signature] += 1
+
+            row = {
+                "index": index,
+                "path": pub_path,
+                "category": level1,
+                "subcategory": level2,
+                "pub_size": len(blob),
+                "pub_sha256": pub_hash,
+                "stream_count": len(stream_paths),
+                "stream_set_sha256": signature,
+            }
+
+            for path, data in streams.items():
+                family = KEY_PATHS.get(path)
+                stream_rows.append({
+                    "template": pub_path,
+                    "category": level1,
+                    "subcategory": level2,
+                    "stream_path": path,
+                    "family": family or "",
+                    "len": len(data),
+                    "sha256": h(data),
+                })
+                if family:
+                    key_hashes[family][h(data)] += 1
+                    key_sizes[family].append(len(data))
+                    row[f"{family}_len"] = len(data)
+                    row[f"{family}_sha256"] = h(data)
+
+            for seed_name, seed in seed_bytes.items():
+                target = seed["expected_stream"]
+                if target not in streams:
+                    continue
+                actual = streams[target]
+                seed_blob = seed["bytes"]
+                seed_similarity[seed_name].append({
+                    "template": pub_path,
+                    "stream_len": len(actual),
+                    "seed_len": len(seed_blob),
+                    "exact": actual == seed_blob,
+                    "common_prefix": common_prefix(seed_blob, actual),
+                    "common_suffix": common_suffix(seed_blob, actual),
+                })
+
+            rows.append(row)
+
+    n = len(pubs)
+    ubiquitous = [
+        {"path": path, "count": count, "pct": round(100 * count / n, 2)}
+        for path, count in presence.most_common()
+        if count == n
+    ]
+    variable = [
+        {"path": path, "count": count, "pct": round(100 * count / n, 2)}
+        for path, count in presence.most_common()
+        if count != n
+    ]
+
+    seed_report = {}
+    for seed_name, items in seed_similarity.items():
+        by_prefix = sorted(items, key=lambda x: (x["common_prefix"], x["common_suffix"]), reverse=True)
+        by_suffix = sorted(items, key=lambda x: (x["common_suffix"], x["common_prefix"]), reverse=True)
+        seed_blob = seed_bytes[seed_name]["bytes"]
+        seed_report[seed_name] = {
+            "zip_path": seed_bytes[seed_name]["zip_path"],
+            "expected_stream": seed_bytes[seed_name]["expected_stream"],
+            "seed_len": len(seed_blob),
+            "seed_sha256": h(seed_blob),
+            "templates_with_stream": len(items),
+            "exact_matches": sum(1 for x in items if x["exact"]),
+            "best_common_prefix": by_prefix[:10],
+            "best_common_suffix": by_suffix[:10],
+        }
+
+    duplicate_whole_files = [
+        {"sha256": digest, "count": count}
+        for digest, count in whole_hashes.most_common()
+        if count > 1
+    ]
+
+    key_streams = {}
+    for family in sorted(key_sizes):
+        hashes = key_hashes[family]
+        key_streams[family] = {
+            "size": stats(key_sizes[family]),
+            "unique_hashes": len(hashes),
+            "largest_hash_clusters": [
+                {"sha256": digest, "count": count}
+                for digest, count in hashes.most_common(15)
+            ],
+        }
+
+    report = {
+        "schema": SCHEMA,
+        "apk": str(apk_path),
+        "template_count": n,
+        "parsed_count": len(rows),
+        "parse_errors": parse_errors,
+        "categories": [
+            {"category": a, "subcategory": b, "count": count}
+            for (a, b), count in categories.most_common()
+        ],
+        "stream_path_count": len(presence),
+        "ubiquitous_streams": ubiquitous,
+        "variable_streams": variable,
+        "stream_set_signature_count": len(stream_set_clusters),
+        "largest_stream_set_clusters": [
+            {"stream_set_sha256": sig, "count": count}
+            for sig, count in stream_set_clusters.most_common(20)
+        ],
+        "duplicate_whole_files": duplicate_whole_files,
+        "key_streams": key_streams,
+        "seed_similarity": seed_report,
+        "interpretation_boundary": (
+            "Corpus frequency and byte similarity are physical evidence only; "
+            "they do not prove semantic ownership of Publisher fields."
+        ),
+    }
+    return report, rows, stream_rows
+
+
+def write_csv(path: Path, rows: List[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys = sorted({k for row in rows for k in row})
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_summary(path: Path, report: dict) -> None:
+    lines = [
+        "# Canyua Publisher 2013 template corpus",
+        "",
+        f"- templates: **{report['template_count']}**",
+        f"- parsed OLE/CFB: **{report['parsed_count']}**",
+        f"- distinct stream paths: **{report['stream_path_count']}**",
+        f"- distinct stream-set signatures: **{report['stream_set_signature_count']}**",
+        f"- exact duplicate PUB files: **{len(report['duplicate_whole_files'])} hash groups**",
+        "",
+        "## Streams present in every template",
+        "",
+    ]
+    for item in report["ubiquitous_streams"]:
+        lines.append(f"- `{item['path']}`")
+    lines += ["", "## Key stream size / hash diversity", ""]
+    for family, info in report["key_streams"].items():
+        size = info["size"]
+        lines.append(
+            f"- **{family}**: count={size.get('count', 0)}, "
+            f"min={size.get('min')}, median={size.get('median')}, "
+            f"max={size.get('max')}, unique_hashes={info['unique_hashes']}"
+        )
+    lines += ["", "## Seed comparison", ""]
+    for seed, info in report["seed_similarity"].items():
+        best = info["best_common_prefix"][0] if info["best_common_prefix"] else None
+        lines.append(
+            f"- **{seed}**: seed_len={info['seed_len']}, "
+            f"stream_present={info['templates_with_stream']}, "
+            f"exact_matches={info['exact_matches']}, "
+            f"best_prefix={best['common_prefix'] if best else None}"
+        )
+    lines += [
+        "",
+        "## Interpretation boundary",
+        "",
+        report["interpretation_boundary"],
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("base_apk", type=Path)
+    p.add_argument("--out", type=Path, default=Path("work/canyua-template-corpus"))
+    args = p.parse_args()
+
+    report, templates, streams = analyze(args.base_apk)
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    write_csv(args.out / "templates.csv", templates)
+    write_csv(args.out / "streams.csv", streams)
+    write_summary(args.out / "SUMMARY.md", report)
+
+    print(json.dumps({
+        "template_count": report["template_count"],
+        "parsed_count": report["parsed_count"],
+        "stream_path_count": report["stream_path_count"],
+        "stream_set_signature_count": report["stream_set_signature_count"],
+        "key_streams": {
+            k: {
+                "size": v["size"],
+                "unique_hashes": v["unique_hashes"],
+            }
+            for k, v in report["key_streams"].items()
+        },
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
