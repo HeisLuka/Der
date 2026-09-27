@@ -27,7 +27,8 @@ SCHEMA = "der/pub-cfb-stream-diff/v1"
 
 KEY_STREAMS = {
     "/Contents": "contents",
-    "/Quill/CONTENTS": "quill",
+    "/Quill/QuillSub/CONTENTS": "quill",
+    "/Quill/CONTENTS": "quill_legacy_or_simplified",
     "/Escher/EscherStm": "escher",
     "/Escher/EscherDelayStm": "escher_delay",
     "/\x05SummaryInformation": "summary_information",
@@ -288,7 +289,7 @@ def print_text(report: dict, include_unchanged: bool) -> None:
 def self_test() -> None:
     before = {
         "/Contents": b"abcDEFghi",
-        "/Quill/CONTENTS": b"same",
+        "/Quill/QuillSub/CONTENTS": b"same",
         "/Old": b"gone",
     }
     after = {
@@ -311,7 +312,7 @@ def self_test() -> None:
     assert contents["after_changed"] == {"start": 3, "end": 6, "len": 3}
     assert contents["family"] == "contents"
 
-    insertion = diff_one("/Quill/CONTENTS", b"abcghi", b"abcXYZghi")
+    insertion = diff_one("/Quill/QuillSub/CONTENTS", b"abcghi", b"abcXYZghi")
     assert insertion["before_changed"] == {"start": 3, "end": 3, "len": 0}
     assert insertion["after_changed"] == {"start": 3, "end": 6, "len": 3}
     print("OK")
