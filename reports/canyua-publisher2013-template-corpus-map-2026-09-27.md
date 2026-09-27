@@ -342,6 +342,39 @@ seed profile:
 
 No semantic meaning is assigned to the two flags yet.
 
+### Independent Publisher corpus cross-check
+
+The entry-139 discriminator was checked against a second, unrelated public
+Publisher corpus from GemeindebriefDruckerei rather than relying only on files
+bundled inside Canyua.
+
+Evidence:
+
+- workflow: `.github/workflows/canyua-entry139-independent-corpus.yml`
+- successful run: `36307630024`
+- artifact: `canyua-entry139-independent-corpus` / `10927962184`
+- samples: A001-A007 and A014 public Microsoft Publisher templates;
+- source PUB bytes were used transiently by CI and were **not** retained in the
+  evidence artifact.
+
+Result:
+
+```text
+independent samples: 8
+publisher2013_template_profile: 8 / 8
+canyua_blank_seed_profile:      0 / 8
+unknown:                        0 / 8
+```
+
+All eight independent files have the same 32-byte entry-139 form and exact
+entry hash observed in the 252 Canyua-bundled Publisher templates:
+
+`0331ff885069ee3401aa0aca44409483fcdc3c4a9f3a8beab0b776b0c72aa9ae`
+
+This does not prove that the 28-byte seed form is globally unique to Canyua,
+but it materially weakens the alternative explanation that it is simply a
+common Publisher 2010+ document variant.
+
 ### Consequence for the Canyua writer fingerprint
 
 The static writer path copies the pre-content-chunk seed region and the
