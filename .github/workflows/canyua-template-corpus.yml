@@ -1,0 +1,64 @@
+name: Analyze Canyua Publisher template corpus
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "experiments/analyze-canyua-template-corpus.py"
+      - ".github/workflows/canyua-template-corpus.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Find latest Canyua package artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=package-canyua-publisher&per_page=20"             --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | reverse | .[0].id')"
+          test -n "$ID"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Using artifact $ID"
+
+      - name: Download saved Canyua XAPK artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/package
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > work/package.zip
+          unzip -q work/package.zip -d work/package
+          XAPK="$(find work/package -type f -name '*.xapk' -print -quit)"
+          test -n "$XAPK"
+          unzip -p "$XAPK" com.canyua.publisherexpert.apk > work/base.apk
+          test "$(stat -c %s work/base.apk)" -gt 100000000
+
+      - name: Analyze all bundled Publisher templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check olefile
+          python3 experiments/analyze-canyua-template-corpus.py work/base.apk             --out work/canyua-template-corpus
+
+      - name: Print summary
+        run: cat work/canyua-template-corpus/SUMMARY.md
+
+      - name: Upload corpus analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-publisher-template-corpus-analysis
+          path: work/canyua-template-corpus/
+          retention-days: 30
