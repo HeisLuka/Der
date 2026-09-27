@@ -22,24 +22,24 @@ jobs:
       - name: Find saved Canyua package artifact
         id: artifact
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          ID="$(gh api "repos/\${GITHUB_REPOSITORY}/actions/artifacts?name=package-canyua-publisher&per_page=20" \
+          ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=package-canyua-publisher&per_page=20" \
             --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | reverse | .[0].id')"
           test -n "$ID"
           echo "id=$ID" >> "$GITHUB_OUTPUT"
 
       - name: Extract base APK
         env:
-          GH_TOKEN: \${{ github.token }}
-          ARTIFACT_ID: \${{ steps.artifact.outputs.id }}
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.id }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p work/package
-          gh api "repos/\${GITHUB_REPOSITORY}/actions/artifacts/\${ARTIFACT_ID}/zip" > work/package.zip
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > work/package.zip
           unzip -q work/package.zip -d work/package
           XAPK="$(find work/package -type f -name '*.xapk' -print -quit)"
           test -n "$XAPK"
