@@ -7,6 +7,7 @@ on:
     paths:
       - "experiments/analyze-canyua-prechunk-table.py"
       - "experiments/probe-canyua-contents-profile.py"
+      - "experiments/analyze-canyua-pretable-xrefs.py"
       - ".github/workflows/canyua-prechunk-table.yml"
 
 permissions:
@@ -61,11 +62,28 @@ jobs:
           set -euo pipefail
           python3 experiments/probe-canyua-contents-profile.py             --apk-corpus work/base.apk             --assert-known-corpus             --json work/canyua-prechunk-variability/entry139-profile.json
 
+      - name: Scan pre-chunk field-0x03 values outside the table
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 experiments/analyze-canyua-pretable-xrefs.py             work/base.apk             --out work/canyua-prechunk-variability/field03-xrefs.json
+
       - name: Print summary
         run: |
           cat work/canyua-prechunk-variability/SUMMARY.md
           echo
           cat work/canyua-prechunk-variability/entry139-profile.json
+          echo
+          python3 - <<'PY'
+          import json
+          p="work/canyua-prechunk-variability/field03-xrefs.json"
+          d=json.load(open(p))
+          print(json.dumps({
+              "distinct_field03_values": d["distinct_field03_values"],
+              "values_with_external_occurrence_count": d["values_with_external_occurrence_count"],
+              "values_with_external_occurrences": d["values_with_external_occurrences"],
+          }, indent=2))
+          PY
 
       - name: Upload analysis
         uses: actions/upload-artifact@v4
