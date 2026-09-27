@@ -67,10 +67,20 @@ def main():
           "child_schema_count":len(child_schemas),"top_child_schemas":child_schemas.most_common(10),
           "page_count_histogram":dict(page_counts),
         })
-    report={"templates":len(rows),"errors":errors,"document_lengths":dict(collections.Counter(r["length"] for r in rows)),"fields":stats}
+    cpd_page_rows=[]
+    for r in rows:
+        byid={f["id"]:f for f in r["fields"]}
+        cpd=byid.get(0x01,{}).get("value")
+        page_count=len(byid.get(0x02,{}).get("page_handles",[]))
+        cpd_page_rows.append((cpd,page_count))
+    cpd_page_match=sum(1 for cpd,pc in cpd_page_rows if cpd==pc)
+    report={"templates":len(rows),"errors":errors,"document_lengths":dict(collections.Counter(r["length"] for r in rows)),"fields":stats,
+            "cpd_page_count_match":cpd_page_match,
+            "cpd_page_count_total":len(cpd_page_rows),
+            "cpd_page_pairs":dict(collections.Counter("%s->%s"%(a,b) for a,b in cpd_page_rows))}
     a.out.mkdir(parents=True,exist_ok=True)
     (a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
-    lines=["# Root DOCUMENT field matrix","",f"- analyzed: **{len(rows)}**","", "## Fields",""]
+    lines=["# Root DOCUMENT field matrix","",f"- analyzed: **{len(rows)}**",f"- CPd == PageList count: **{report['cpd_page_count_match']} / {report['cpd_page_count_total']}**",f"- CPd/PageList pairs: **{report['cpd_page_pairs']}**","", "## Fields",""]
     for s in stats:
         lines.append(f"- field 0x{s['id']:02X}: present **{s['present']}/{len(rows)}**, types={s['types']}, lengths={s['lengths']}, unique_values={s['unique_values']}, payload_hashes={s['payload_hashes']}, page_counts={s['page_count_histogram']}")
         if s["top_values"]: lines.append(f"  - top values: {s['top_values']}")
