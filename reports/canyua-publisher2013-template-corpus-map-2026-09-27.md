@@ -452,6 +452,94 @@ bound. The stronger corpus statement is:
 > Publisher 2013 templates, while the Canyua blank seed differs only in the
 > four-byte entry-139 discriminator.
 
+### Path-length relocation law and 56-byte post-path state
+
+A follow-up pass explains why the otherwise byte-identical 3906-byte table
+appears at 48 different absolute offsets.
+
+Across **252 / 252** bundled Publisher 2013 templates:
+
+- the UTF-16LE save-path string begins at `Contents+94`;
+- its byte length varies with the saved path;
+- the NUL-terminated path end is followed by exactly **56 bytes**;
+- the 143-entry table begins immediately after those 56 bytes.
+
+Therefore:
+
+```text
+table_start = path_end_including_UTF16_NUL + 56
+```
+
+This holds for every analyzed template.
+
+The previously observed 48 distinct table starts are therefore fully explained
+by 48 distinct serialized path lengths, not by document-specific table
+content.
+
+This also predicts the geometry of Chaptera's independently hash-pinned native
+Publisher blank from already-recorded evidence:
+
+```text
+path bytes        = Contents[94:260]
+UTF-16 NUL        = Contents[260:262]
+predicted table   = Contents[318:4224]
+first chunk       = 4224
+```
+
+because `262 + 56 = 318` and `318 + 3906 = 4224`.
+
+That exact geometry is not hypothetical: **8 / 252** bundled Publisher
+templates independently have `table_start=318`, `scaffold_start=332`, and
+`first_chunk=4224`.
+
+#### Structure inside the 56-byte region
+
+The 56-byte region is not byte-constant, but most of its variability is now
+explained structurally.
+
+For all **252 / 252** templates:
+
+- direct field `0A/B8` equals the root Contents **trailer offset**;
+- direct field `0B/B8` equals **`table_start - 16`** (equivalently
+  `path_end + 40`);
+- 48 of the 56 byte positions are constant across the corpus;
+- the final 24 bytes are byte-identical across all 252 files.
+
+Two remaining 32-bit direct values move together:
+
+- **251 / 252** files use `0x15CB` in both positions;
+- **1 / 252** uses `0x1144` in both positions.
+
+The one outlier is `Gift Certificates/Bars.pub`. It is also the only file
+whose 152-byte `DocumentSummaryInformation` differs from the other 251.
+The property stream difference is confined to the OLEPS SystemIdentifier:
+that file records a Windows 6.2 producer profile while the other 251 record
+Windows 10.0.
+
+This is a strong producer/environment correlation, **not** proof that these
+two Contents values directly encode the Windows version.
+
+The bundled Canyua blank seed provides a useful third control:
+
+- seed OLEPS SystemIdentifier also reports Windows 6.2;
+- the two Contents values are instead `0x11A6`;
+- therefore the values cannot be reduced to a simple Windows-version code.
+
+The safe classification is **producer/environment-dependent state candidate**.
+
+The seed also confirms the same pointer formulas. In addition, the 16-bit
+value at the start of the final fixed substructure changes from `0x0F4E`
+(seed) to `0x0F52` (real-template profile), exactly matching:
+
+```text
+seed: 3902-byte table + 16 = 3918 = 0x0F4E
+real: 3906-byte table + 16 = 3922 = 0x0F52
+```
+
+This further reduces the former pre-chunk opaque region from arbitrary bytes
+to path serialization + pointer/length-derived state + a small residual
+producer/environment-dependent pair.
+
 ### Zero-seed consequence and claim boundary
 
 This materially narrows Chaptera's zero-seed problem, but does **not** justify
