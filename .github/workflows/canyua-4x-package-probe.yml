@@ -1,0 +1,118 @@
+name: Probe pre-PairIP Canyua 4.1.15
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/canyua-4x-package-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download public 4.1.15 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          URL='https://www.apk20.com/apk/com.canyua.publisherexpert/download/205'
+          curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36'             -L --fail --retry 2 --connect-timeout 20             -D work/headers.txt "$URL" -o work/package.bin
+          printf 'bytes=%s\n' "$(stat -c %s work/package.bin)" | tee work/package-info.txt
+          printf 'sha256=' | tee -a work/package-info.txt
+          sha256sum work/package.bin | tee -a work/package-info.txt
+          file work/package.bin | tee -a work/package-info.txt
+          xxd -p -l 16 work/package.bin | tee -a work/package-info.txt
+
+      - name: Inspect package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! unzip -t work/package.bin >/dev/null 2>&1; then
+            echo "Downloaded payload is not ZIP/APK" | tee work/verdict.txt
+            head -c 4096 work/package.bin > work/payload-head.txt
+            exit 0
+          fi
+
+          unzip -Z1 work/package.bin | sort > work/files.txt
+          grep -E '^lib/[^/]+/[^/]+\.so$' work/files.txt > work/native-files.txt || true
+          grep -Ei 'pairip|licensecheck|libmspub|libpubBuilder|Publisher Data|\.so$'             work/files.txt > work/interesting-files.txt || true
+
+          python3 - <<'PY'
+          import json, zipfile
+          from pathlib import Path
+
+          p=Path("work/package.bin")
+          z=zipfile.ZipFile(p)
+          names=z.namelist()
+          abis=sorted({n.split("/")[1] for n in names if n.startswith("lib/") and n.count("/") >= 2})
+          native=[n for n in names if n.startswith("lib/") and n.endswith(".so")]
+
+          needles={
+              "pairip":[b"com/pairip",b"com.pairip",b"licensecheck",b"LicenseActivity"],
+              "reader":[b"mspubCore",b"MSPUBDocument",b"libmspub"],
+              "writer":[b"libpubBuilder",b"MSPUBBuilder",b"createPub"],
+          }
+          hits={k:[] for k in needles}
+          scan=[n for n in names if n.endswith(".dex") or n=="AndroidManifest.xml" or n.endswith(".so")]
+          for name in scan:
+              try:
+                  blob=z.read(name).lower()
+              except Exception:
+                  continue
+              for group,pats in needles.items():
+                  for pat in pats:
+                      if pat.lower() in blob:
+                          hits[group].append({"file":name,"needle":pat.decode("ascii","replace")})
+
+          report={
+              "schema":"der/canyua-4x-package-probe/v1",
+              "bytes":p.stat().st_size,
+              "abis":abis,
+              "native_library_count":len(native),
+              "native_libraries":native,
+              "marker_hits":hits,
+              "pairip_present":bool(hits["pairip"]),
+              "reader_markers_present":bool(hits["reader"]),
+              "writer_markers_present":bool(hits["writer"]),
+          }
+          Path("work/report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n")
+          Path("work/verdict.txt").write_text(
+              "pairip_present=%s\nreader=%s\nwriter=%s\nabis=%s\n" % (
+                  report["pairip_present"],
+                  report["reader_markers_present"],
+                  report["writer_markers_present"],
+                  ",".join(abis),
+              )
+          )
+          print(json.dumps(report,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-4.1.15-package-probe
+          path: |
+            work/headers.txt
+            work/package-info.txt
+            work/payload-head.txt
+            work/files.txt
+            work/native-files.txt
+            work/interesting-files.txt
+            work/report.json
+            work/verdict.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload package for emulator follow-up
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-4.1.15-package
+          path: work/package.bin
+          retention-days: 7
