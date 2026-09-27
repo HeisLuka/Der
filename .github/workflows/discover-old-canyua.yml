@@ -22,7 +22,7 @@ jobs:
           mkdir -p work
           API1='https://ws75.aptoide.com/api/7/app/get?package_name=com.canyua.publisherexpert&nodes=meta%2Cversions'
           API2='https://ws2.aptoide.com/api/7/app/getMeta?package_name=com.canyua.publisherexpert'
-          PAGE='https://publisher-expert.en.aptoide.com/versions'
+          PAGE='https://apkcombo.com/publisher-for-ms-office/com.canyua.publisherexpert/old-versions/'
 
           : > work/query-url.txt
           for spec in "app-get.json|$API1" "get-meta.json|$API2" "versions.html|$PAGE"; do
