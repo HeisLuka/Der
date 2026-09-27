@@ -294,7 +294,7 @@ def self_test() -> None:
     }
     after = {
         "/Contents": b"abcXYZghi",
-        "/Quill/CONTENTS": b"same",
+        "/Quill/QuillSub/CONTENTS": b"same",
         "/New": b"new",
     }
     report = diff_maps(before, after)
