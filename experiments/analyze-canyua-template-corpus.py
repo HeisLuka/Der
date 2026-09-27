@@ -319,6 +319,24 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
                     ),
                     reverse=True,
                 )[:10],
+                "run_seed_start_counts": [
+                    {"offset": offset, "count": count}
+                    for offset, count in Counter(
+                        x["longest_run_seed_start"] for x in items
+                    ).most_common()
+                ],
+                "run_actual_start_counts": [
+                    {"offset": offset, "count": count}
+                    for offset, count in Counter(
+                        x["longest_run_actual_start"] for x in items
+                    ).most_common()
+                ],
+                "run_delta_counts": [
+                    {"delta": delta, "count": count}
+                    for delta, count in Counter(
+                        x["longest_run_delta"] for x in items
+                    ).most_common()
+                ],
                 "largest_contiguous_runs": sorted(
                     (
                         {
