@@ -21,12 +21,18 @@ jobs:
           set -euo pipefail
           mkdir -p work
           URL='https://www.apk20.com/apk/com.canyua.publisherexpert/download/205'
-          curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36'             -L --fail --retry 2 --connect-timeout 20             -D work/headers.txt "$URL" -o work/package.bin
-          printf 'bytes=%s\n' "$(stat -c %s work/package.bin)" | tee work/package-info.txt
-          printf 'sha256=' | tee -a work/package-info.txt
-          sha256sum work/package.bin | tee -a work/package-info.txt
-          file work/package.bin | tee -a work/package-info.txt
-          xxd -p -l 16 work/package.bin | tee -a work/package-info.txt
+          CODE="$(curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36' \
+            -L --retry 2 --connect-timeout 20 -sS \
+            -D work/headers.txt -w '%{http_code}' "$URL" -o work/package.bin || true)"
+          printf 'http=%s\n' "$CODE" | tee work/package-info.txt
+          printf 'bytes=%s\n' "$(stat -c %s work/package.bin 2>/dev/null || printf 0)" | tee -a work/package-info.txt
+          if [ -f work/package.bin ]; then
+            printf 'sha256=' | tee -a work/package-info.txt
+            sha256sum work/package.bin | tee -a work/package-info.txt
+            file work/package.bin | tee -a work/package-info.txt
+            od -An -tx1 -N16 work/package.bin | tr -d ' \n' | tee -a work/package-info.txt
+            printf '\n' | tee -a work/package-info.txt
+          fi
 
       - name: Inspect package
         shell: bash
