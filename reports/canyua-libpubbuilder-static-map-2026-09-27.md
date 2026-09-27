@@ -323,6 +323,50 @@ from “template input is accepted” to:
 This does **not** imply that all bytes before `0x1030` are immutable, or that
 the same copy boundary applies to every Publisher generation.
 
+## Candidate Contents fingerprint: pre-chunk entry 139
+
+The full 252-template corpus revealed one extremely narrow distinction between
+the bundled blank `Contents.dat` seed and the real Publisher 2013 templates.
+
+All 143 entries of the fixed pre-chunk table are byte-invariant across the
+252 templates. Entries 1-138 and 140-143 are also byte-identical to the seed.
+
+Only **entry 139** differs:
+
+```text
+Contents.dat seed, 28 bytes:
+  01/18=139
+  03/20=65536020
+  08/08
+  09/10=1
+  0C/20=5
+
+all 252 Publisher templates, 32 bytes:
+  01/18=139
+  03/20=65536020
+  06/08
+  07/08
+  08/08
+  09/10=1
+  0C/20=5
+```
+
+The extra Publisher-template bytes are exactly two zero-length block headers:
+`06 08` and `07 08`.
+
+The observed Contents writer copies this table from the blank seed and its
+known `BuildHead` patch coordinates are earlier in the stream. Therefore a
+new Canyua output is predicted to retain the 28-byte seed profile at entry 139.
+
+That prediction is intentionally not promoted to a dynamic fact until a
+legitimately generated Canyua PUB is captured. A dedicated probe now exists:
+
+`experiments/probe-canyua-contents-profile.py`
+
+It classifies the two evidence-backed forms as
+`canyua_blank_seed_profile` and `publisher2013_template_profile`, leaving
+everything else `unknown`.
+
 ## Cross-check against the bundled Publisher 2013 corpus
 
 The 252 bundled `.pub` templates were parsed as a separate corpus after this
