@@ -1,0 +1,291 @@
+# Canyua Publisher 2013 template corpus map — 2026-09-27
+
+## Scope
+
+Cross-corpus physical analysis of the 252 Microsoft Publisher `.pub` templates
+bundled by Canyua under:
+
+`assets/Publisher Templates/2013/BUILT-IN/`
+
+The source package is the already preserved Canyua 5.1.1 package artifact used
+by the Android competitor teardown.
+
+Analysis implementation:
+
+- `experiments/analyze-canyua-template-corpus.py`
+- workflow: `.github/workflows/canyua-template-corpus.yml`
+- final evidence run: GitHub Actions run `36306742403`
+- artifact: `canyua-publisher-template-corpus-analysis`, id `10927491863`
+
+This is physical/corpus evidence. It does not by itself assign semantic meaning
+to unknown Publisher fields.
+
+## Corpus integrity
+
+All 252 bundled `.pub` files parse as OLE/CFB.
+
+Observed:
+
+- templates: **252**
+- parsed: **252 / 252**
+- exact duplicate PUB files: **0**
+- distinct stream paths across the corpus: **10**
+- distinct stream-set signatures: **1**
+
+Therefore every tested template has the same logical stream topology.
+
+## Exact stream topology
+
+The following 10 stream paths occur in **252 / 252** templates:
+
+```text
+/\x01CompObj
+/\x03Internal
+/\x05DocumentSummaryInformation
+/\x05SummaryInformation
+/Contents
+/Envelope
+/Escher/EscherDelayStm
+/Escher/EscherStm
+/Quill/QuillSub/\x01CompObj
+/Quill/QuillSub/CONTENTS
+```
+
+Important correction to earlier shorthand: the observed Quill data stream in
+this corpus is:
+
+`/Quill/QuillSub/CONTENTS`
+
+not `/Quill/CONTENTS`.
+
+The static `poleHelperCreate(12, ...)` observation must **not** be interpreted
+as evidence that the final PUB contains 12 streams. The controlled corpus shows
+10 stream paths; the internal builder count and the CFB stream count are
+different facts.
+
+## Stream diversity
+
+| Family | Count | Min bytes | Median bytes | Max bytes | Unique hashes |
+|---|---:|---:|---:|---:|---:|
+| Contents | 252 | 11,080 | 15,269 | 47,086 | 252 |
+| Quill/QuillSub/CONTENTS | 252 | 6,144 | 15,872 | 57,344 | 252 |
+| EscherStm | 252 | 4,408 | 20,055 | 148,894 | 251 |
+| EscherDelayStm | 252 | 0 | 1,059.5 | 188,613 | 124 |
+| SummaryInformation | 252 | 33,548 | 50,900 | 50,900 | 252 |
+| DocumentSummaryInformation | 252 | 152 | 152 | 152 | 2 |
+
+Two particularly useful invariants:
+
+1. `Contents` and Quill are unique in every template despite the identical
+   stream topology.
+2. `DocumentSummaryInformation` is nearly invariant: **251 / 252** templates
+   share one exact 152-byte stream hash.
+
+`EscherDelayStm` is much less diverse than the main Escher stream: only 124
+unique hashes for 252 files, including repeated clusters and 11 empty streams.
+
+## Seed-to-real-stream comparison
+
+The APK's blank-document seed bundle contains:
+
+| Seed | Bytes | Expected real stream |
+|---|---:|---|
+| `Contents.dat` | 9,314 | `/Contents` |
+| `QUILL_CONTENTS.dat` | 2,048 | `/Quill/QuillSub/CONTENTS` |
+| `EscherStm.dat` | 972 | `/Escher/EscherStm` |
+| `SummaryInformation.dat` | 44,640 | `/\x05SummaryInformation` |
+
+No full seed is byte-identical to a complete corresponding stream in any of the
+252 templates. Whole-stream equality is therefore the wrong model.
+
+### Contents: strong reusable scaffold
+
+This is the strongest result.
+
+For **all 252 / 252** templates, the exact seed slice:
+
+```text
+Contents.dat
+seed offset: 0x100
+length:      0xE80 = 3712 bytes
+end:         0xF80
+SHA-256:     27ffd0f6f810d57b62c844c4bb37442ef6d3c4de8655bde5e65d780cb6f27441
+```
+
+appears as one **contiguous exact-byte run** inside the real `/Contents`
+stream.
+
+The target offset varies by document. Common observed actual starts include
+`0x150` (18 files), `0x142` (15), `0x162` (14), `0x152` (13) and
+`0x15E` (13), among many others.
+
+This means the stable bytes are not merely in a fixed absolute location. A
+variable-sized prefix precedes a reusable 3712-byte physical scaffold.
+
+A 64-byte block scan gives:
+
+- minimum seed-block hit rate: **65.52%**
+- median: **71.03%**
+- maximum: **72.41%**
+- longest same-delta exact run: **3712 bytes in every template**
+
+The contiguous-run result is much stronger than the percentage alone.
+
+### Escher: small universal structural slice
+
+For **252 / 252** templates, the longest same-delta seed run is exactly:
+
+```text
+EscherStm.dat
+seed offset: 0x300
+length:      0x80 = 128 bytes
+SHA-256:     a92a58689d9b53733367516274b3395f8993551794200f2acfe8e9c210225635
+```
+
+The target offset varies substantially by document.
+
+The bytes sit inside ordinary OfficeArt/Escher record structure, including
+record headers in the `0xF002 / 0xF003 / 0xF004` family. This is compatible
+with a small reusable OfficeArt scaffold, but the result is much weaker than
+the Contents finding.
+
+The 64-byte block hit rate is exactly **20%** for all 252 templates.
+
+### Quill: partial reusable regions, not one universal long scaffold
+
+Quill shows two dominant seed anchors for each template's longest exact run:
+
+- seed offset `0x100`: **173 / 252**
+- seed offset `0x240`: **79 / 252**
+
+Longest exact same-delta run:
+
+- minimum: 64 bytes
+- median: 64 bytes
+- maximum: **384 bytes**
+
+64-byte seed-block hit rate:
+
+- minimum: **18.75%**
+- median: **21.88%**
+- maximum: **40.62%**
+
+The strongest 384-byte run starts at `QUILL_CONTENTS.dat + 0x240`.
+
+This supports partial Quill template reuse, but not a claim that most Quill
+bytes are copied unchanged.
+
+### SummaryInformation: high scattered overlap, weak contiguous evidence
+
+A naive 64-byte block scan finds a high overlap:
+
+- minimum: **76.61%**
+- median: **81.64%**
+- maximum: **81.78%**
+
+However the longest same-delta exact run is only **64 bytes** in every
+template. It is always:
+
+```text
+seed start:   0x140
+actual start: 0x102
+delta:        -62
+length:       64
+```
+
+Therefore the high block-hit percentage must not be interpreted as “~80% of
+SummaryInformation.dat is copied as one tail”. Repeated/common blocks can
+inflate relocation-insensitive matching.
+
+This matters because static analysis found a method named
+`SetSummaryTail`. The method name plus scattered corpus overlap is suggestive,
+but the exact writer policy still requires dynamic Canyua output.
+
+## What this changes in the writer model
+
+Before this corpus pass, template seeding was established from the writer API
+and JNI call graph:
+
+```text
+SetContentsTemplate
+SetEscherTemplate
+SetQuillTemplate
+SetSummaryTail
+    -> Build(..., 0xF)
+```
+
+The corpus now adds independent byte-level evidence:
+
+```text
+seed files
+   |
+   +-- Contents.dat
+   |      exact 3712-byte scaffold survives in 252/252 real templates
+   |
+   +-- QUILL_CONTENTS.dat
+   |      smaller partial exact regions survive
+   |
+   +-- EscherStm.dat
+   |      128-byte structural slice survives in 252/252
+   |
+   +-- SummaryInformation.dat
+          many scattered blocks match, but no long contiguous run
+```
+
+The best current model is therefore not “copy a blank PUB and patch a few
+bytes”, and not “generate every stream from zero”.
+
+It is closer to:
+
+```text
+stable physical scaffold(s)
+        +
+document-specific generated prefixes / records / payloads
+        +
+relocated or rewritten stream regions
+        +
+CFB assembly
+        =
+output PUB
+```
+
+The exact partition differs by stream family.
+
+## High-value next experiments
+
+1. **Decode `Contents.dat[0x100:0xF80]` structurally**
+   - identify record/chunk boundaries inside the universal 3712-byte scaffold;
+   - map which fields are invariant and which references point outside it.
+
+2. **Controlled dynamic writer oracle**
+   - resave-control first;
+   - then one semantic mutation per arm;
+   - compare against resave-control with `experiments/diff-pub-cfb.py`.
+
+3. **Generated blank output vs seed bundle**
+   - this remains the cleanest way to distinguish copied scaffolding from
+     builder-generated equivalents.
+
+4. **Cross-version corpus comparison**
+   - compare Publisher 98/2000/2002/2003/current files with the same physical
+     scaffold fingerprints;
+   - do not assume the Publisher 2013 template result is universal.
+
+## Claim boundary
+
+Confirmed for the 252 bundled Publisher 2013 templates:
+
+- identical 10-stream topology;
+- exact observed Quill path;
+- the 3712-byte Contents seed scaffold survives in all 252;
+- the 128-byte Escher slice survives in all 252;
+- smaller Quill seed regions survive;
+- Summary has high scattered overlap but only a 64-byte contiguous run.
+
+Not confirmed yet:
+
+- that Canyua's current writer emits exactly this 2013 profile;
+- that Microsoft Publisher itself uses these seed files;
+- semantic meaning of the universal Contents slice;
+- whether Canyua copies the slice or independently regenerates byte-identical
+  structures from the seed-backed builder state.
