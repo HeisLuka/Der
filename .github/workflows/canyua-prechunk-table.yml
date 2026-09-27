@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "experiments/analyze-canyua-prechunk-table.py"
+      - "experiments/probe-canyua-contents-profile.py"
       - ".github/workflows/canyua-prechunk-table.yml"
 
 permissions:
@@ -54,8 +55,17 @@ jobs:
           python3 experiments/analyze-canyua-prechunk-table.py work/base.apk \
             --out work/canyua-prechunk-variability
 
+      - name: Validate entry-139 profile discriminator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 experiments/probe-canyua-contents-profile.py             --apk-corpus work/base.apk             --assert-known-corpus             --json work/canyua-prechunk-variability/entry139-profile.json
+
       - name: Print summary
-        run: cat work/canyua-prechunk-variability/SUMMARY.md
+        run: |
+          cat work/canyua-prechunk-variability/SUMMARY.md
+          echo
+          cat work/canyua-prechunk-variability/entry139-profile.json
 
       - name: Upload analysis
         uses: actions/upload-artifact@v4
