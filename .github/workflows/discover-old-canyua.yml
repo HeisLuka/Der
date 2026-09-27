@@ -22,7 +22,7 @@ jobs:
           mkdir -p work
           API1='https://ws75.aptoide.com/api/7/app/get?package_name=com.canyua.publisherexpert&nodes=meta%2Cversions'
           API2='https://ws2.aptoide.com/api/7/app/getMeta?package_name=com.canyua.publisherexpert'
-          PAGE='https://apkcombo.com/publisher-for-ms-office/com.canyua.publisherexpert/old-versions/'
+          PAGE='https://apkcombo.com/publisher-for-ms-office/com.canyua.publisherexpert/download/phone-3.1.10-apk'
 
           : > work/query-url.txt
           for spec in "app-get.json|$API1" "get-meta.json|$API2" "versions.html|$PAGE"; do
@@ -131,10 +131,13 @@ jobs:
           PY
 
       - name: Download selected historical APK
-        if: \${{ hashFiles('work/target.json') != '' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -f work/target.json ]; then
+            echo "No Aptoide binary target. The HTML probe is retained as evidence."
+            exit 0
+          fi
           URL="$(python3 -c 'import json; print(json.load(open("work/target.json"))["path"])')"
           curl -A 'Mozilla/5.0' -L --fail --retry 3 --connect-timeout 20 "$URL" -o work/canyua-old.apk
           sha256sum work/canyua-old.apk | tee work/sha256.txt
@@ -142,10 +145,13 @@ jobs:
           unzip -t work/canyua-old.apk >/dev/null
 
       - name: Inspect ABI and protection markers
-        if: \${{ hashFiles('work/canyua-old.apk') != '' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -f work/canyua-old.apk ]; then
+            echo "No historical APK downloaded; skipping binary inspection."
+            exit 0
+          fi
           unzip -Z1 work/canyua-old.apk | grep -E '^lib/[^/]+/[^/]+\.so$' | sort | tee work/native-files.txt || true
           unzip -Z1 work/canyua-old.apk | grep -Ei 'pairip|licensecheck|libmspub|libpubBuilder|Publisher Data|\.so$' | sort | tee work/interesting-files.txt || true
 
