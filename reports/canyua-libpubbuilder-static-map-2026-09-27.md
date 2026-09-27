@@ -261,6 +261,38 @@ The correct discriminator is dynamic:
 4. reopen it in Microsoft Publisher and Chaptera;
 5. perform controlled one-feature edits and binary-diff each output.
 
+## Cross-check against the bundled Publisher 2013 corpus
+
+The 252 bundled `.pub` templates were parsed as a separate corpus after this
+static map was written. See:
+
+`reports/canyua-publisher2013-template-corpus-map-2026-09-27.md`
+
+The corpus materially sharpens two parts of the static model:
+
+- all **252 / 252** templates expose one identical topology of **10 stream
+  paths**; therefore the `poleHelperCreate(12, ...)` argument must not be
+  described as “12 output streams”;
+- the observed Quill data path is
+  `/Quill/QuillSub/CONTENTS`, not the earlier shorthand
+  `/Quill/CONTENTS`.
+
+Most importantly, the seed relationship now has independent byte-level
+evidence. The exact `Contents.dat[0x100:0xF80]` slice — **3712 bytes** —
+occurs contiguously in the real `/Contents` stream of every one of the 252
+templates, at document-dependent target offsets. Its SHA-256 is
+`27ffd0f6f810d57b62c844c4bb37442ef6d3c4de8655bde5e65d780cb6f27441`.
+
+Smaller exact reusable slices also occur in Escher and Quill. SummaryInformation
+has high scattered 64-byte block overlap but only a 64-byte contiguous run, so
+the static `SetSummaryTail` name is still not enough to claim a whole copied
+tail.
+
+This strengthens the model from “the writer accepts seed files” to “at least
+one large seed-derived physical scaffold is independently observable across a
+large real-PUB corpus”, while still leaving the exact current Canyua writer
+policy to the dynamic oracle experiment.
+
 ## APK size: reader engine vs product baggage
 
 Canyua's large APK should not be interpreted as the minimum size for a local mobile PUB reader.
