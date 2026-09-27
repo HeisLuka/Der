@@ -261,6 +261,68 @@ The correct discriminator is dynamic:
 4. reopen it in Microsoft Publisher and Chaptera;
 5. perform controlled one-feature edits and binary-diff each output.
 
+## Contents writer: seed prefix copy boundary recovered
+
+Static disassembly now resolves the template use more precisely.
+
+`MSPUB::Contents::BeginDocument` opens the configured `Contents.dat`
+template and derives three physical coordinates from it:
+
+- the trailer offset is read from stream offset `0x1A`;
+- a header-size/path-field value is read from `0x5A`;
+- after parsing the trailer directory, the `CHUNK_OFFSET` of the first
+  referenced content chunk is retained as the template prefix boundary.
+
+For the bundled blank seed those values are:
+
+```text
+trailer offset:       0x1E62
+first content chunk:  0x1030
+template stream size: 0x2462
+```
+
+`MSPUB::Contents::Build` then follows this physical plan:
+
+```text
+Contents.dat[0 : first_content_chunk]
+        |
+        |  copied into output
+        v
+targeted early-header patching by BuildHead()
+        |
+        +-- regenerate content chunks at first_content_chunk
+        |
+        +-- regenerate chunk-reference/trailer area
+        v
+output Contents stream
+```
+
+The copy loop is bounded by the stored first-content-chunk offset. After it,
+the writer seeks to that exact offset before calling its generated chunk
+content path and later the chunk-reference builder.
+
+`BuildHead` does mutate selected fields in the copied prefix. In the observed
+path those writes are confined to early header coordinates including
+`0x08`, `0x1A`, `0x54`, a cleared region beginning at `0x5E`, and the
+derived trailer-offset mirror near `0xBC` for this seed profile.
+
+This distinction matters: **the whole prefix is not claimed to remain
+verbatim**, but the independently identified universal scaffold
+`Contents.dat[0x100:0xF80]` lies after those header patches and before the
+first generated content chunk at `0x1030`. It is therefore inside the
+template-copy region and outside the observed patch coordinates.
+
+Combined with the 252-template corpus, this upgrades the Contents conclusion
+from “template input is accepted” to:
+
+> Canyua's Contents writer deliberately reuses a pre-content-chunk physical
+> region from the seed template, and the 3712-byte scaffold at
+> `0x100:0xF80` is carried through that copy path unchanged in the analyzed
+> writer profile.
+
+This does **not** imply that all bytes before `0x1030` are immutable, or that
+the same copy boundary applies to every Publisher generation.
+
 ## Cross-check against the bundled Publisher 2013 corpus
 
 The 252 bundled `.pub` templates were parsed as a separate corpus after this
