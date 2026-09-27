@@ -367,6 +367,26 @@ It classifies the two evidence-backed forms as
 `canyua_blank_seed_profile` and `publisher2013_template_profile`, leaving
 everything else `unknown`.
 
+### Independent check of the entry-139 discriminator
+
+A second public corpus, independent of the Canyua APK, was checked after the
+candidate fingerprint was defined.
+
+Eight Microsoft Publisher templates (A001-A007 and A014) from
+GemeindebriefDruckerei all classify as the same 32-byte
+`publisher2013_template_profile` seen in the 252 bundled Publisher templates.
+None carries the 28-byte `canyua_blank_seed_profile`.
+
+Workflow evidence:
+
+- `.github/workflows/canyua-entry139-independent-corpus.yml`
+- run `36307630024`
+- artifact `10927962184`
+
+This strengthens the 28-byte form as a **Canyua seed/writer-profile candidate
+fingerprint**, but still does not establish global uniqueness. Dynamic Canyua
+output remains the decisive test.
+
 ## Cross-check against the bundled Publisher 2013 corpus
 
 The 252 bundled `.pub` templates were parsed as a separate corpus after this
