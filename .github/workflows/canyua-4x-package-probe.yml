@@ -32,9 +32,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! unzip -t work/package.bin >/dev/null 2>&1; then
-            echo "Downloaded payload is not ZIP/APK" | tee work/verdict.txt
-            head -c 4096 work/package.bin > work/payload-head.txt
+          if [ ! -f work/package.bin ] || ! unzip -t work/package.bin >/dev/null 2>&1; then
+            echo "Public source did not return a ZIP/APK payload." | tee work/verdict.txt
+            [ ! -f work/package.bin ] || head -c 4096 work/package.bin > work/payload-head.txt
             exit 0
           fi
 
@@ -115,4 +115,5 @@ jobs:
         with:
           name: canyua-4.1.15-package
           path: work/package.bin
+          if-no-files-found: ignore
           retention-days: 7
