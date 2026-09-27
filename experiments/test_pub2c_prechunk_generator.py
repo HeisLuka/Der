@@ -201,7 +201,7 @@ class PrechunkMetamorphicTests(unittest.TestCase):
             self.assertEqual(data[0x5E:pe], encoded)
             self.assertEqual(struct.unpack_from("<I", data, pe + 8)[0], outer)
             self.assertEqual(struct.unpack_from("<I", data, outer)[0], len(m.build_table()) + 16)
-            self.assertEqual(struct.unpack_from("<I", data, outer + 8)[0], 143)
+            self.assertEqual(struct.unpack_from("<I", data, outer + 6)[0], 143)
             self.assertEqual(data[ts:], m.build_table())
             self.assertEqual(len(data), ts + 3906)
             cases += 1
