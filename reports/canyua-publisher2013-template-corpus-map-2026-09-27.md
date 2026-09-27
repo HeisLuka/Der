@@ -390,6 +390,91 @@ and inspected.
 The useful point is that the dynamic test no longer needs to begin with a
 whole-file diff: entry 139 gives a precise first discriminator to check.
 
+## Full 143-entry table invariance — follow-up
+
+A second structural pass over the preserved package artifact sharpened the
+pre-chunk result beyond the earlier 3712-byte scaffold observation.
+
+The exact 143-entry pre-chunk table was extracted from all 252 bundled
+Publisher 2013 templates and compared entry-by-entry.
+
+Result:
+
+- analyzed successfully: **252 / 252**;
+- table entry count: **143 / 143** in every file;
+- table serialized length: **3906 bytes** in every file;
+- full table SHA-256: `d21025e0e5324f0cf1312bff15d11ce7afa2e699ac5869e093a550b9e445fc81`;
+- distinct full-table hashes across the 252 files: **1**;
+- absolute table start positions: **48** distinct offsets;
+- per-index raw entry invariance: **143 / 143**;
+- per-index direct-child schema invariance: **143 / 143**;
+- per-index relative-offset invariance: **143 / 143**;
+- direct child fields varying across documents: **0**.
+
+So the table is not merely structurally similar across the corpus. Within this
+Publisher-2013 template set it is a **byte-identical relocatable 3906-byte
+structure**. Document-specific content changes the absolute position of the
+table, but not the table bytes.
+
+After normalizing only the known sequential
+`id=0x01 / type=0x18 / value=1..143` field, the 143 entries collapse to
+**30 byte-pattern clusters** and only **12 direct-child schemas**.
+
+The repeated numeric domains are also very small:
+
+- `id=0x03 / type=0x20`: present in 134 entries, **5** observed values;
+- `id=0x09 / type=0x10`: present in 112 entries, **4** observed values;
+- `id=0x0C / type=0x20`: present in 134 entries, **6** observed values;
+- the other recurring direct fields in this table are zero-length presence
+  blocks.
+
+This is strong evidence that the former opaque pre-chunk region contains a
+small fixed indexed/default/service grammar rather than document-dependent
+opaque state.
+
+### Seed comparison
+
+The bundled Canyua `Contents.dat` seed carries the same table shape but is
+**3902 bytes**, not 3906.
+
+Entry-by-entry comparison gives:
+
+- **142 / 143** seed entries are byte-identical to the 252-template profile;
+- only entry **139** differs;
+- the difference is exactly the already isolated four-byte addition of
+  `id=0x06/type=0x08` and `id=0x07/type=0x08`;
+- all other direct fields in entry 139 are identical.
+
+Therefore the earlier 3712-byte universal scaffold was a conservative lower
+bound. The stronger corpus statement is:
+
+> the complete 143-entry table is byte-identical across all 252 bundled
+> Publisher 2013 templates, while the Canyua blank seed differs only in the
+> four-byte entry-139 discriminator.
+
+### Zero-seed consequence and claim boundary
+
+This materially narrows Chaptera's zero-seed problem, but does **not** justify
+copying the 3906 bytes as an opaque constant.
+
+The correct next classification target is a generated structural rule:
+
+```text
+143 indexed entries
+  + 12 observed direct-child schemas
+  + small finite value domains
+  + deterministic relative layout
+  = candidate GENERATED_RULE
+```
+
+Promotion to `GENERATED_RULE` still requires an independent native/open
+acceptance discriminator or equivalent clean-room evidence. Until then this is
+a strong scoped structural-constant result for the tested Publisher-2013
+corpus, not a universal cross-version semantic claim.
+
+No semantic names are assigned to the 143 entries or their fields from
+frequency alone.
+
 ## What this changes in the writer model
 
 Before this corpus pass, template seeding was established from the writer API
