@@ -1,0 +1,23 @@
+name: Canyua oracle tools
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "experiments/diff-pub-cfb.py"
+      - ".github/workflows/canyua-oracle-tools.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Self-test CFB diff
+        run: python3 experiments/diff-pub-cfb.py --self-test
+      - name: Compile Python source
+        run: python3 -m py_compile experiments/diff-pub-cfb.py
