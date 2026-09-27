@@ -20,17 +20,35 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work
-          BASE='https://ws75.aptoide.com/api/7/app/get'
-          URL="$BASE/package_name=com.canyua.publisherexpert/nodes=meta,versions"
-          echo "$URL" | tee work/query-url.txt
-          curl -A 'Mozilla/5.0' -L --fail --compressed "$URL" -o work/app-get.json
+          API1='https://ws75.aptoide.com/api/7/app/get?package_name=com.canyua.publisherexpert&nodes=meta%2Cversions'
+          API2='https://ws2.aptoide.com/api/7/app/getMeta?package_name=com.canyua.publisherexpert'
+          PAGE='https://publisher-expert.en.aptoide.com/versions'
+
+          : > work/query-url.txt
+          for spec in "app-get.json|$API1" "get-meta.json|$API2" "versions.html|$PAGE"; do
+            name="${spec%%|*}"
+            url="${spec#*|}"
+            echo "$name $url" | tee -a work/query-url.txt
+            code="$(curl -A 'Mozilla/5.0' -L --compressed -sS -o "work/$name" -w '%{http_code}' "$url" || true)"
+            echo "$name http=$code" | tee -a work/query-url.txt
+          done
 
           python3 - <<'PY'
           import json
           from pathlib import Path
 
-          data=json.loads(Path("work/app-get.json").read_text())
           rows=[]
+          payloads=[]
+          for name in ("app-get.json", "get-meta.json"):
+              p=Path("work")/name
+              if not p.exists():
+                  continue
+              try:
+                  data=json.loads(p.read_text())
+              except Exception as exc:
+                  print(name, "not JSON:", exc)
+                  continue
+              payloads.append((name, data))
 
           def walk(node, trail="root"):
               if isinstance(node, dict):
@@ -50,7 +68,25 @@ jobs:
                   for i,v in enumerate(node):
                       walk(v, trail+f"[{i}]")
 
-          walk(data)
+          for name, data in payloads:
+              print("--- walking", name, "---")
+              walk(data, name)
+
+          html_path=Path("work/versions.html")
+          if html_path.exists():
+              html=html_path.read_text(errors="replace")
+              import re
+              snippets=[]
+              for m in re.finditer(r"3\.1\.10", html, flags=re.I):
+                  a=max(0,m.start()-1500); b=min(len(html),m.end()+2500)
+                  snippets.append(html[a:b])
+              Path("work/html-3.1.10-context.txt").write_text("\n\n--- MATCH ---\n\n".join(snippets))
+              hrefs=sorted(set(re.findall(r'href=["\\\']([^"\\\']+)["\\\']', "\n".join(snippets), flags=re.I)))
+              urls=sorted(set(re.findall(r'https?://[^"\\\'<> ]+', "\n".join(snippets), flags=re.I)))
+              Path("work/html-candidates.txt").write_text("\n".join(hrefs+urls)+"\n")
+              print("HTML 3.1.10 matches:", len(snippets))
+              for item in hrefs+urls:
+                  print("HTML candidate:", item)
 
           dedup={}
           for row in rows:
@@ -73,7 +109,8 @@ jobs:
               json.dumps(rows, indent=2, ensure_ascii=False)+"\n"
           )
 
-          print("Aptoide status:", (data.get("info") or {}).get("status"))
+          for name, data in payloads:
+              print(name, "status:", (data.get("info") or {}).get("status"))
           print("version candidates:", len(rows))
           for row in rows:
               print(row.get("vername"), row.get("vercode"), row.get("filesize"), row.get("path"))
@@ -164,6 +201,10 @@ jobs:
           path: |
             work/query-url.txt
             work/app-get.json
+            work/get-meta.json
+            work/versions.html
+            work/html-3.1.10-context.txt
+            work/html-candidates.txt
             work/version-candidates.json
             work/target.json
             work/sha256.txt
