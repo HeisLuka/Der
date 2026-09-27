@@ -138,6 +138,226 @@ def seed_block_matches(seed: bytes, actual: bytes, block_size: int = 64) -> dict
     }
 
 
+
+_FIXED_BLOCK_LENGTH = {
+    0x78: 0, 0x05: 0, 0x08: 0, 0x0A: 0,
+    0x10: 2, 0x12: 2, 0x18: 2, 0x1A: 2, 0x07: 2,
+    0x20: 4, 0x22: 4, 0x58: 4, 0x68: 4, 0x70: 4, 0xB8: 4,
+    0x28: 8, 0x38: 16, 0x48: 24,
+}
+_VARIABLE_BLOCK_TYPES = {0xC0, 0x80, 0x82, 0x88, 0x8A, 0x90, 0x98, 0xA0}
+
+
+def _u16(data: bytes, offset: int) -> int:
+    return int.from_bytes(data[offset:offset + 2], "little")
+
+
+def _u32(data: bytes, offset: int) -> int:
+    return int.from_bytes(data[offset:offset + 4], "little")
+
+
+def _parse_block(data: bytes, offset: int) -> dict:
+    if offset < 0 or offset + 2 > len(data):
+        raise ValueError(f"block header outside stream at 0x{offset:X}")
+
+    block_id = data[offset]
+    block_type = data[offset + 1]
+    data_offset = offset + 2
+
+    if block_type in _VARIABLE_BLOCK_TYPES:
+        if data_offset + 4 > len(data):
+            raise ValueError(f"variable block length outside stream at 0x{offset:X}")
+        data_length = _u32(data, data_offset)
+        payload_offset = data_offset + 4
+    else:
+        data_length = _FIXED_BLOCK_LENGTH.get(block_type, 0)
+        payload_offset = data_offset
+
+    end = data_offset + data_length
+    if end < data_offset or end > len(data):
+        raise ValueError(
+            f"block 0x{offset:X} type=0x{block_type:02X} ends outside stream: 0x{end:X}"
+        )
+
+    value = None
+    if data_length == 2 and block_type not in _VARIABLE_BLOCK_TYPES:
+        value = _u16(data, data_offset)
+    elif data_length == 4 and block_type not in _VARIABLE_BLOCK_TYPES:
+        value = _u32(data, data_offset)
+
+    return {
+        "start": offset,
+        "id": block_id,
+        "type": block_type,
+        "data_offset": data_offset,
+        "payload_offset": payload_offset,
+        "data_length": data_length,
+        "end": end,
+        "value": value,
+        "variable": block_type in _VARIABLE_BLOCK_TYPES,
+    }
+
+
+def _children(data: bytes, container: dict) -> List[dict]:
+    rows = []
+    pos = container["payload_offset"]
+    while pos < container["end"]:
+        child = _parse_block(data, pos)
+        if child["end"] <= pos:
+            raise ValueError(f"non-advancing child at 0x{pos:X}")
+        rows.append(child)
+        pos = child["end"]
+    if pos != container["end"]:
+        raise ValueError(
+            f"children do not end at container boundary: 0x{pos:X} != 0x{container['end']:X}"
+        )
+    return rows
+
+
+def analyze_contents_0x2c(contents: bytes, seed_scaffold: bytes) -> dict:
+    """Describe the physical pre-chunk/trailer geometry of a 0x2C Contents stream.
+
+    The block framing follows the public libmspub parser's physical rules.
+    Names are intentionally conservative: the large pre-chunk type-0x90 table
+    remains semantically unnamed until independent evidence identifies it.
+    """
+    if len(contents) < 0x30:
+        raise ValueError("Contents stream too short")
+    if contents[2] != 0x2C:
+        raise ValueError(f"not a 0x2C Contents stream: magic={contents[:4].hex()}")
+
+    trailer_offset = _u32(contents, 0x1A)
+    if trailer_offset + 4 > len(contents):
+        raise ValueError(f"trailer offset outside stream: 0x{trailer_offset:X}")
+    trailer_length = _u32(contents, trailer_offset)
+    trailer_end = trailer_offset + trailer_length
+
+    trailer_parts = []
+    pos = trailer_offset + 4
+    for _ in range(3):
+        part = _parse_block(contents, pos)
+        trailer_parts.append(part)
+        pos = part["end"]
+
+    directory = next((p for p in trailer_parts if p["type"] == 0x90), None)
+    refs = []
+    if directory is not None:
+        seq_num = -1
+        for entry in _children(contents, directory):
+            seq_num += 1
+            if entry["type"] != 0x88:
+                continue
+            values = {}
+            for child in _children(contents, entry):
+                if child["id"] in (0x02, 0x04, 0x05):
+                    values[child["id"]] = child["value"]
+            if values.get(0x04) is not None:
+                refs.append({
+                    "seq_num": seq_num,
+                    "chunk_type": values.get(0x02),
+                    "chunk_offset": values.get(0x04),
+                    "parent_seq_num": values.get(0x05),
+                })
+
+    first_chunk_offset = min(
+        (r["chunk_offset"] for r in refs if r["chunk_offset"] is not None),
+        default=None,
+    )
+    first_chunk_type = None
+    if first_chunk_offset is not None:
+        for ref in refs:
+            if ref["chunk_offset"] == first_chunk_offset:
+                first_chunk_type = ref["chunk_type"]
+                break
+
+    prelude_blocks = []
+    if first_chunk_offset is not None:
+        pos = 0x30
+        while pos < first_chunk_offset:
+            block = _parse_block(contents, pos)
+            if block["end"] <= pos:
+                raise ValueError(f"non-advancing prelude block at 0x{pos:X}")
+            prelude_blocks.append(block)
+            pos = block["end"]
+        if pos != first_chunk_offset:
+            raise ValueError(
+                f"prelude blocks do not meet first chunk: 0x{pos:X} != 0x{first_chunk_offset:X}"
+            )
+
+    prechunk_table = prelude_blocks[-1] if prelude_blocks else None
+    table_children = []
+    sequential_ids = False
+    child_types = Counter()
+    if (
+        prechunk_table is not None
+        and prechunk_table["id"] == 0x03
+        and prechunk_table["type"] == 0x90
+    ):
+        table_children = _children(contents, prechunk_table)
+        child_types.update(child["type"] for child in table_children)
+
+        seq_values = []
+        for entry in table_children:
+            if entry["type"] != 0x88:
+                seq_values.append(None)
+                continue
+            id1 = [
+                child for child in _children(contents, entry)
+                if child["id"] == 0x01 and child["type"] == 0x18
+            ]
+            seq_values.append(id1[0]["value"] if len(id1) == 1 else None)
+        sequential_ids = seq_values == list(range(1, len(table_children) + 1))
+
+    scaffold_offset = contents.find(seed_scaffold)
+    scaffold_end = scaffold_offset + len(seed_scaffold) if scaffold_offset >= 0 else None
+    scaffold_inside_table = bool(
+        scaffold_offset >= 0
+        and prechunk_table is not None
+        and prechunk_table["start"] <= scaffold_offset
+        and scaffold_end <= prechunk_table["end"]
+    )
+
+    return {
+        "magic_hex": contents[:4].hex(),
+        "stream_len": len(contents),
+        "trailer_offset": trailer_offset,
+        "trailer_length": trailer_length,
+        "trailer_end": trailer_end,
+        "trailer_part_types": [p["type"] for p in trailer_parts],
+        "chunk_reference_count": len(refs),
+        "first_chunk_offset": first_chunk_offset,
+        "first_chunk_type": first_chunk_type,
+        "prelude_block_count": len(prelude_blocks),
+        "prechunk_table_start": prechunk_table["start"] if prechunk_table else None,
+        "prechunk_table_end": prechunk_table["end"] if prechunk_table else None,
+        "prechunk_table_id": prechunk_table["id"] if prechunk_table else None,
+        "prechunk_table_type": prechunk_table["type"] if prechunk_table else None,
+        "prechunk_table_child_count": len(table_children),
+        "prechunk_table_child_types": {
+            f"0x{k:02X}": v for k, v in sorted(child_types.items())
+        },
+        "prechunk_table_seq_1_to_n": sequential_ids,
+        "scaffold_offset": scaffold_offset if scaffold_offset >= 0 else None,
+        "scaffold_len": len(seed_scaffold),
+        "scaffold_inside_prechunk_table": scaffold_inside_table,
+        "scaffold_delta_from_table_start": (
+            scaffold_offset - prechunk_table["start"]
+            if scaffold_inside_table and prechunk_table is not None
+            else None
+        ),
+        "scaffold_gap_to_first_chunk": (
+            first_chunk_offset - scaffold_end
+            if scaffold_end is not None and first_chunk_offset is not None
+            else None
+        ),
+        "prechunk_table_ends_at_first_chunk": bool(
+            prechunk_table is not None
+            and first_chunk_offset is not None
+            and prechunk_table["end"] == first_chunk_offset
+        ),
+    }
+
+
 def stats(values: Iterable[int]) -> dict:
     vals = sorted(values)
     if not vals:
@@ -198,6 +418,8 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
         rows: List[dict] = []
         stream_rows: List[dict] = []
         seed_similarity = defaultdict(list)
+        contents_structures = []
+        universal_contents_scaffold = seed_bytes["contents"]["bytes"][0x100:0xF80]
 
         for index, pub_path in enumerate(pubs, 1):
             blob = apk.read(pub_path)
@@ -246,6 +468,31 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
                     key_sizes[family].append(len(data))
                     row[f"{family}_len"] = len(data)
                     row[f"{family}_sha256"] = h(data)
+
+            if "/Contents" in streams:
+                try:
+                    structure = analyze_contents_0x2c(
+                        streams["/Contents"],
+                        universal_contents_scaffold,
+                    )
+                    structure["template"] = pub_path
+                    contents_structures.append(structure)
+                    for key in (
+                        "first_chunk_offset",
+                        "first_chunk_type",
+                        "prechunk_table_start",
+                        "prechunk_table_end",
+                        "prechunk_table_child_count",
+                        "scaffold_offset",
+                        "scaffold_delta_from_table_start",
+                        "scaffold_gap_to_first_chunk",
+                    ):
+                        row[f"contents_{key}"] = structure.get(key)
+                    row["contents_prechunk_table_seq_1_to_n"] = structure[
+                        "prechunk_table_seq_1_to_n"
+                    ]
+                except Exception as exc:
+                    row["contents_structure_error"] = repr(exc)
 
             for seed_name, seed in seed_bytes.items():
                 target = seed["expected_stream"]
@@ -372,6 +619,79 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
             ],
         }
 
+    contents_structure_report = {
+        "analyzed": len(contents_structures),
+        "magic_counts": [
+            {"magic_hex": value, "count": count}
+            for value, count in Counter(
+                row["magic_hex"] for row in contents_structures
+            ).most_common()
+        ],
+        "first_chunk_offset": stats(
+            row["first_chunk_offset"]
+            for row in contents_structures
+            if row["first_chunk_offset"] is not None
+        ),
+        "first_chunk_type_counts": [
+            {"type": value, "count": count}
+            for value, count in Counter(
+                row["first_chunk_type"] for row in contents_structures
+            ).most_common()
+        ],
+        "chunk_reference_count": stats(
+            row["chunk_reference_count"] for row in contents_structures
+        ),
+        "prechunk_table_start": stats(
+            row["prechunk_table_start"]
+            for row in contents_structures
+            if row["prechunk_table_start"] is not None
+        ),
+        "prechunk_table_end": stats(
+            row["prechunk_table_end"]
+            for row in contents_structures
+            if row["prechunk_table_end"] is not None
+        ),
+        "prechunk_table_child_count": stats(
+            row["prechunk_table_child_count"] for row in contents_structures
+        ),
+        "prechunk_table_id_type_counts": [
+            {"id": key[0], "type": key[1], "count": count}
+            for key, count in Counter(
+                (row["prechunk_table_id"], row["prechunk_table_type"])
+                for row in contents_structures
+            ).most_common()
+        ],
+        "prechunk_table_ends_at_first_chunk": sum(
+            1 for row in contents_structures
+            if row["prechunk_table_ends_at_first_chunk"]
+        ),
+        "prechunk_table_seq_1_to_n": sum(
+            1 for row in contents_structures
+            if row["prechunk_table_seq_1_to_n"]
+        ),
+        "universal_scaffold_exact_matches": sum(
+            1 for row in contents_structures
+            if row["scaffold_offset"] is not None
+        ),
+        "universal_scaffold_inside_prechunk_table": sum(
+            1 for row in contents_structures
+            if row["scaffold_inside_prechunk_table"]
+        ),
+        "scaffold_delta_from_table_start_counts": [
+            {"delta": value, "count": count}
+            for value, count in Counter(
+                row["scaffold_delta_from_table_start"]
+                for row in contents_structures
+                if row["scaffold_delta_from_table_start"] is not None
+            ).most_common()
+        ],
+        "scaffold_gap_to_first_chunk": stats(
+            row["scaffold_gap_to_first_chunk"]
+            for row in contents_structures
+            if row["scaffold_gap_to_first_chunk"] is not None
+        ),
+    }
+
     report = {
         "schema": SCHEMA,
         "apk": str(apk_path),
@@ -393,6 +713,7 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
         "duplicate_whole_files": duplicate_whole_files,
         "key_streams": key_streams,
         "seed_similarity": seed_report,
+        "contents_0x2c_structure": contents_structure_report,
         "interpretation_boundary": (
             "Corpus frequency and byte similarity are physical evidence only; "
             "they do not prove semantic ownership of Publisher fields."
@@ -444,7 +765,18 @@ def write_summary(path: Path, report: dict) -> None:
             f"best_suffix={info['best_common_suffix'][0]['common_suffix'] if info['best_common_suffix'] else None}, "
             f"best_64B_block_match={info['block_match']['best_templates'][0]['matched_pct'] if info['block_match']['best_templates'] else None}%"
         )
+    structure = report["contents_0x2c_structure"]
     lines += [
+        "",
+        "## Contents 0x2C pre-chunk structure",
+        "",
+        f"- analyzed: **{structure['analyzed']}**",
+        f"- pre-chunk table ends at first chunk: **{structure['prechunk_table_ends_at_first_chunk']}**",
+        f"- pre-chunk table has sequential 1..N entry IDs: **{structure['prechunk_table_seq_1_to_n']}**",
+        f"- exact 3712-byte scaffold matches: **{structure['universal_scaffold_exact_matches']}**",
+        f"- scaffold is inside pre-chunk table: **{structure['universal_scaffold_inside_prechunk_table']}**",
+        f"- scaffold delta from table start: **{structure['scaffold_delta_from_table_start_counts']}**",
+        f"- table child-count stats: **{structure['prechunk_table_child_count']}**",
         "",
         "## Interpretation boundary",
         "",
