@@ -102,7 +102,9 @@ def seed_block_matches(seed: bytes, actual: bytes, block_size: int = 64) -> dict
             matches.append((seed_offset, actual_offset, actual_offset - seed_offset))
 
     best_run_blocks = 0
+    best_run_start = None
     run_blocks = 0
+    run_start = None
     previous = None
     for item in matches:
         if (
@@ -113,8 +115,16 @@ def seed_block_matches(seed: bytes, actual: bytes, block_size: int = 64) -> dict
             run_blocks += 1
         else:
             run_blocks = 1
-        best_run_blocks = max(best_run_blocks, run_blocks)
+            run_start = item
+
+        if run_blocks > best_run_blocks:
+            best_run_blocks = run_blocks
+            best_run_start = run_start
         previous = item
+
+    best_seed_start = best_run_start[0] if best_run_start is not None else None
+    best_actual_start = best_run_start[1] if best_run_start is not None else None
+    best_delta = best_run_start[2] if best_run_start is not None else None
 
     return {
         "block_size": block_size,
@@ -122,6 +132,9 @@ def seed_block_matches(seed: bytes, actual: bytes, block_size: int = 64) -> dict
         "matched_blocks": len(matches),
         "matched_pct": round(100.0 * len(matches) / total, 2),
         "longest_same_delta_run_bytes": best_run_blocks * block_size,
+        "longest_run_seed_start": best_seed_start,
+        "longest_run_actual_start": best_actual_start,
+        "longest_run_delta": best_delta,
     }
 
 
@@ -294,6 +307,9 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
                             "total_blocks": x["total_blocks"],
                             "matched_pct": x["matched_pct"],
                             "longest_same_delta_run_bytes": x["longest_same_delta_run_bytes"],
+                            "longest_run_seed_start": x["longest_run_seed_start"],
+                            "longest_run_actual_start": x["longest_run_actual_start"],
+                            "longest_run_delta": x["longest_run_delta"],
                         }
                         for x in items
                     ),
@@ -303,6 +319,20 @@ def analyze(apk_path: Path) -> Tuple[dict, List[dict], List[dict]]:
                     ),
                     reverse=True,
                 )[:10],
+                "largest_contiguous_runs": sorted(
+                    (
+                        {
+                            "template": x["template"],
+                            "run_bytes": x["longest_same_delta_run_bytes"],
+                            "seed_start": x["longest_run_seed_start"],
+                            "actual_start": x["longest_run_actual_start"],
+                            "delta": x["longest_run_delta"],
+                        }
+                        for x in items
+                    ),
+                    key=lambda x: x["run_bytes"],
+                    reverse=True,
+                )[:20],
             },
         }
 
