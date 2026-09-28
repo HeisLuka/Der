@@ -239,10 +239,10 @@ adb shell svc wifi disable || true
 adb shell svc data disable || true
 sleep 2
 
-URI='content://com.android.externalstorage.documents/document/primary%3ADownload%2FCanyuaOracleSample.pub'
+URI='file:///sdcard/Download/CanyuaOracleSample.pub'
 adb logcat -c || true
 adb shell am force-stop "$PKG" || true
-adb shell am start -W   -n "$MAIN"   -a android.intent.action.VIEW   -d "$URI"   -t application/x-mspublisher   --grant-read-uri-permission   --grant-write-uri-permission   > "$OUT/open-pub.txt" 2>&1 || true
+adb shell am start -W   -n "$MAIN"   -a android.intent.action.VIEW   -d "$URI"   -t application/x-mspublisher   > "$OUT/open-pub.txt" 2>&1 || true
 sleep 10
 
 set +e
