@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - ".github/workflows/canyua-prepairip-dynamic-oracle.yml"
-      - "experiments/run-canyua-prepairip-dynamic-discovery.sh"\n      - "experiments/analyze-canyua-oracle-bundle.py"\n      - "experiments/diff-pub-cfb.py"
+      - "experiments/run-canyua-prepairip-dynamic-discovery.sh"
+      - "experiments/analyze-canyua-oracle-bundle.py"
+      - "experiments/diff-pub-cfb.py"
   workflow_dispatch:
 
 permissions:
@@ -18,55 +20,129 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Self-test oracle analyzers\n        run: |\n          python3 experiments/diff-pub-cfb.py --self-test\n          python3 experiments/analyze-canyua-oracle-bundle.py --self-test\n\n      - name: Acquire public pre-PairIP candidate
+      - name: Self-test oracle analyzers
+        run: |
+          python3 experiments/diff-pub-cfb.py --self-test
+          python3 experiments/analyze-canyua-oracle-bundle.py --self-test
+
+      - name: Acquire public pre-PairIP candidate
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p work
+          mkdir -p work/candidates
+          PAGE='https://ff.phoneky.com/android/?id=d1d262450'
+          UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 Chrome/153 Safari/537.36'
+
+          curl -A "$UA" -L --compressed --fail \
+            -c work/cookies.txt -b work/cookies.txt \
+            "$PAGE" -o work/page.html
+          printf '%s\n' "$PAGE" > work/page-url.txt
+
           python3 - <<'PY'
-          import json
-          import urllib.request
+          import html
+          import re
           from pathlib import Path
+          from urllib.parse import urljoin
 
-          candidates = [
-              ("4.1.15-apk20", "https://www.apk20.com/apk/com.canyua.publisherexpert/download/205"),
-          ]
-          ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36"
-          results = []
-          selected = None
-          for name, url in candidates:
-              out = Path("work") / (name + ".bin")
-              try:
-                  req = urllib.request.Request(url, headers={"User-Agent": ua})
-                  with urllib.request.urlopen(req, timeout=30) as r:
-                      data = r.read()
-                      ctype = r.headers.get("content-type", "")
-                      final = r.geturl()
-                  out.write_bytes(data)
-                  row = {
-                      "name": name,
-                      "url": url,
-                      "final_url": final,
-                      "bytes": len(data),
-                      "content_type": ctype,
-                      "zip_magic": data[:4] == b"PK\\x03\\x04",
-                  }
-                  results.append(row)
-                  if row["zip_magic"] and len(data) > 5_000_000 and selected is None:
-                      selected = out
-              except Exception as exc:
-                  results.append({"name": name, "url": url, "error": repr(exc)})
+          base = Path("work/page-url.txt").read_text().strip()
+          body = Path("work/page.html").read_text(errors="replace")
+          urls = set()
+          for pattern in (
+              r'''href=["']([^"']+)["']''',
+              r'''action=["']([^"']+)["']''',
+              r'''data-[a-zA-Z0-9_-]+=["']([^"']+)["']''',
+          ):
+              for raw in re.findall(pattern, body, flags=re.I):
+                  full = urljoin(base, html.unescape(raw))
+                  low = full.lower()
+                  if any(k in low for k in (
+                      "download", ".apk", ".xapk", "d1d262450",
+                      "262450", "android", "phoneky",
+                  )):
+                      urls.add(full)
 
-          Path("work/acquisition.json").write_text(
-              json.dumps({"candidates": results}, indent=2) + "\n"
+          ranked = sorted(
+              urls,
+              key=lambda u: (
+                  -sum(
+                      weight for token, weight in (
+                          (".apk", 100), (".xapk", 100), ("download", 60),
+                          ("262450", 30), ("d1d262450", 30),
+                      )
+                      if token in u.lower()
+                  ),
+                  u,
+              ),
           )
-          if selected is None:
-              raise SystemExit("No runnable public candidate acquired")
-          Path("work/selected.apk").write_bytes(selected.read_bytes())
+          Path("work/candidate-urls.txt").write_text("\n".join(ranked) + "\n")
+          print("candidate urls:", len(ranked))
+          for url in ranked[:50]:
+              print(url)
           PY
 
+          : > work/results.tsv
+          selected=''
+          i=0
+          while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            i=$((i+1))
+            [ "$i" -le 50 ] || break
+            out="work/candidates/$i.bin"
+            hdr="work/candidates/$i.headers"
+            code="$(curl -A "$UA" -e "$PAGE" -L --compressed -sS \
+              -c work/cookies.txt -b work/cookies.txt \
+              -D "$hdr" -o "$out" -w '%{http_code}' "$url" || true)"
+            bytes="$(wc -c < "$out" 2>/dev/null | tr -d ' ' || printf 0)"
+            magic="$(xxd -p -l 4 "$out" 2>/dev/null || true)"
+            ctype="$(grep -i '^content-type:' "$hdr" | tail -n1 | tr -d '\r' | cut -d: -f2- | xargs || true)"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$i" "$code" "$bytes" "$magic" "$ctype" "$url" >> work/results.tsv
+            if [ "$magic" = "504b0304" ] && [ "$bytes" -gt 10000000 ]; then
+              cp "$out" work/selected.apk
+              printf '%s\n' "$url" > work/selected-url.txt
+              selected="$url"
+              break
+            fi
+          done < work/candidate-urls.txt
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          rows = []
+          p = Path("work/results.tsv")
+          if p.exists():
+              for line in p.read_text(errors="replace").splitlines():
+                  parts = line.split("\t", 5)
+                  if len(parts) == 6:
+                      rows.append({
+                          "index": parts[0],
+                          "http_code": parts[1],
+                          "bytes": int(parts[2] or 0),
+                          "magic": parts[3],
+                          "content_type": parts[4],
+                          "url": parts[5],
+                      })
+          report = {
+              "schema": "der/canyua-prepairip-acquisition/v1",
+              "source_page": Path("work/page-url.txt").read_text().strip(),
+              "candidate_count": len(Path("work/candidate-urls.txt").read_text(errors="replace").splitlines()),
+              "attempts": rows,
+              "selected_url": Path("work/selected-url.txt").read_text().strip()
+                  if Path("work/selected-url.txt").exists() else None,
+              "selected": Path("work/selected.apk").exists(),
+          }
+          Path("work/acquisition.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          PY
+
+          if [ ! -f work/selected.apk ]; then
+            echo "No runnable APK obtained through normal public Phoneky page flow." >&2
+            exit 1
+          fi
+
           unzip -t work/selected.apk >/dev/null
-          sha256sum work/selected.apk | tee work/selected.sha256
+          shasum -a 256 work/selected.apk | tee work/selected.sha256
 
       - name: Guard protection boundary and writer presence
         shell: bash
@@ -80,7 +156,10 @@ jobs:
           p = Path("work/selected.apk")
           z = zipfile.ZipFile(p)
           names = z.namelist()
-          scan = [n for n in names if n.endswith(".dex") or n == "AndroidManifest.xml" or n.endswith(".so")]
+          scan = [
+              n for n in names
+              if n.endswith(".dex") or n == "AndroidManifest.xml" or n.endswith(".so")
+          ]
           needles = {
               "pairip": [b"com/pairip", b"com.pairip", b"licensecheck", b"LicenseActivity"],
               "reader": [b"mspubCore", b"MSPUBDocument", b"libmspub"],
@@ -95,7 +174,10 @@ jobs:
               for group, pats in needles.items():
                   for pat in pats:
                       if pat.lower() in blob:
-                          hits[group].append({"file": name, "needle": pat.decode("ascii", "replace")})
+                          hits[group].append({
+                              "file": name,
+                              "needle": pat.decode("ascii", "replace"),
+                          })
 
           abis = sorted({
               n.split("/")[1] for n in names
@@ -103,13 +185,16 @@ jobs:
           })
           report = {
               "schema": "der/canyua-prepairip-candidate/v1",
+              "bytes": p.stat().st_size,
               "abis": abis,
               "pairip_present": bool(hits["pairip"]),
               "reader_markers_present": bool(hits["reader"]),
               "writer_markers_present": bool(hits["writer"]),
               "marker_hits": hits,
           }
-          Path("work/candidate-report.json").write_text(json.dumps(report, indent=2) + "\n")
+          Path("work/candidate-report.json").write_text(
+              json.dumps(report, indent=2) + "\n"
+          )
           print(json.dumps(report, indent=2))
           if report["pairip_present"]:
               raise SystemExit("Candidate carries PairIP markers; do not proceed")
@@ -121,8 +206,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3             https://raw.githubusercontent.com/apache/poi/74700b5692fd0449031ac6a3c78aec1155d144d5/test-data/publisher/Sample.pub             -o work/Sample.pub
-          echo "6fefdef46b87c767150878dc384549cb2d2ec2ac54de25f8ddb3a5628301107e  work/Sample.pub" | sha256sum -c -
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/apache/poi/74700b5692fd0449031ac6a3c78aec1155d144d5/test-data/publisher/Sample.pub \
+            -o work/Sample.pub
+          actual="$(shasum -a 256 work/Sample.pub | awk '{print $1}')"
+          expected='6fefdef46b87c767150878dc384549cb2d2ec2ac54de25f8ddb3a5628301107e'
+          test "$actual" = "$expected"
 
       - name: Run normal Android launch and offline open
         uses: reactivecircus/android-emulator-runner@v2
@@ -153,6 +242,12 @@ jobs:
         with:
           name: canyua-prepairip-dynamic-oracle-discovery
           path: |
+            work/page-url.txt
+            work/page.html
+            work/candidate-urls.txt
+            work/results.tsv
+            work/candidates/*.headers
+            work/selected-url.txt
             work/acquisition.json
             work/selected.sha256
             work/candidate-report.json
