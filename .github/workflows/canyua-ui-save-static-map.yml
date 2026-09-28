@@ -62,21 +62,24 @@ jobs:
           printf '%s\n' "$BASE" > work/base-apk.txt
           sha256sum "$BASE" > work/base-apk.sha256
 
-      - name: Try public historical 4.1.15 package
+      - name: Download admitted Canyua 4.1.15 runtime artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          URL='https://www.apk20.com/apk/com.canyua.publisherexpert/download/205'
-          if curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36' \
-              -L --fail --retry 2 --connect-timeout 20 \
-              "$URL" -o work/canyua-4.1.15.apk \
-              && unzip -t work/canyua-4.1.15.apk >/dev/null 2>&1; then
-            sha256sum work/canyua-4.1.15.apk > work/historical-apk.sha256
-            printf 'available\n' > work/historical-status.txt
-          else
-            rm -f work/canyua-4.1.15.apk
-            printf 'unavailable\n' > work/historical-status.txt
-          fi
+          mkdir -p work/historical-runtime
+          gh run download 36401841787 \
+            --repo HeisLuka/Der \
+            --name canyua-prepairip-runtime-package \
+            --dir work/historical-runtime
+
+          HIST="work/historical-runtime/runtime-apks/com.canyua.publisherexpert.apk"
+          test -f "$HIST"
+          cp "$HIST" work/canyua-4.1.15.apk
+          unzip -t work/canyua-4.1.15.apk >/dev/null
+          sha256sum work/canyua-4.1.15.apk > work/historical-apk.sha256
+          printf 'available_from_admitted_runtime_artifact\n' > work/historical-status.txt
 
       - name: Decompile base APK
         shell: bash
