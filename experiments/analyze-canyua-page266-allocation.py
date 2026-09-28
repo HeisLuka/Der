@@ -60,6 +60,12 @@ def main():
             "service_pair_first_rank_delta":service_ranks[0]-i,
             "service_pair_after_all_rgohpo":bool(object_ranks) and service_ranks[0]>max(object_ranks),
             "service_pair_after_controlling":controlling_rank is not None and service_ranks[0]>controlling_rank,
+            "service_pair_last_to_rgohpo_first_rank_gap":min(object_ranks)-service_ranks[-1] if object_ranks else None,
+            "service_pair_first_seq":min(pf["web"],pf["form"]),
+            "service_pair_last_seq":max(pf["web"],pf["form"]),
+            "rgohpo_min_seq":min(pf["objects"]) if pf["objects"] else None,
+            "rgohpo_max_seq":max(pf["objects"]) if pf["objects"] else None,
+            "service_last_to_rgohpo_min_seq_gap":min(pf["objects"])-max(pf["web"],pf["form"]) if pf["objects"] else None,
             "rgohpo_min_rank_delta":min(object_ranks)-i if object_ranks else None,
             "rgohpo_max_rank_delta":max(object_ranks)-i if object_ranks else None,
             "rgohpo_phys_span":max(object_ranks)-min(object_ranks)+1 if object_ranks else 0,
@@ -69,7 +75,7 @@ def main():
             "seq268_type":byseq.get(268,{}).get("type"),"seq268_parent":byseq.get(268,{}).get("parent"),"seq268_phys_delta":rank.get(268,None)-i if 268 in rank else None,
           })
         except Exception as exc:errors.append({"template":name,"error":repr(exc)})
-    keys=["object_count","web_form_delta","web_form_abs_delta","web_type","form_type","web_parent","form_parent","web_in_objects","form_in_objects","controlling_in_objects","next_seq","next_type","next_parent","web_physical_rank_delta","form_physical_rank_delta","service_pair_phys_adjacent","service_pair_first_rank_delta","service_pair_after_all_rgohpo","service_pair_after_controlling","rgohpo_min_rank_delta","rgohpo_max_rank_delta","rgohpo_phys_span","rgohpo_phys_contiguous","controlling_rank_delta","seq267_type","seq267_parent","seq267_phys_delta","seq268_type","seq268_parent","seq268_phys_delta"]
+    keys=["object_count","web_form_delta","web_form_abs_delta","web_type","form_type","web_parent","form_parent","web_in_objects","form_in_objects","controlling_in_objects","next_seq","next_type","next_parent","web_physical_rank_delta","form_physical_rank_delta","service_pair_phys_adjacent","service_pair_first_rank_delta","service_pair_after_all_rgohpo","service_pair_after_controlling","service_pair_last_to_rgohpo_first_rank_gap","service_pair_first_seq","service_pair_last_seq","rgohpo_min_seq","rgohpo_max_seq","service_last_to_rgohpo_min_seq_gap","rgohpo_min_rank_delta","rgohpo_max_rank_delta","rgohpo_phys_span","rgohpo_phys_contiguous","controlling_rank_delta","seq267_type","seq267_parent","seq267_phys_delta","seq268_type","seq268_parent","seq268_phys_delta"]
     hist={k:Counter(r[k] for r in rows).most_common() for k in keys}
     branches=Counter((r["next_seq"],r["next_type"],r["next_parent"],r["web_physical_rank_delta"],r["form_physical_rank_delta"],r["web_form_delta"]) for r in rows)
     error_hist=Counter(e["error"] for e in errors).most_common()
