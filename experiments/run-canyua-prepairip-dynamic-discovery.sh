@@ -466,7 +466,7 @@ crash = bool(re.search(
 ))
 
 labels = []
-ui_path = root / "open-pub-ui.xml"
+ui_path = root / ("open-picker-ui.xml" if picker_ui.strip() else "open-pub-ui.xml")
 if ui_path.exists():
     try:
         tree = ET.parse(ui_path).getroot()
@@ -493,6 +493,8 @@ elif filename_visible:
     status = "opened_filename_visible"
 elif direct_file_eacces and text("picker-status.txt"):
     status = "direct_file_eacces_and_picker_failed"
+elif text("picker-open.txt"):
+    status = "picker_returned_but_editor_not_proven"
 elif direct_file_eacces:
     status = "direct_file_ingress_eacces"
 else:
