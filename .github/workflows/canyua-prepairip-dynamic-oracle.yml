@@ -1,0 +1,159 @@
+name: Canyua pre-PairIP dynamic oracle discovery
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-prepairip-dynamic-oracle.yml"
+      - "experiments/run-canyua-prepairip-dynamic-discovery.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Acquire public pre-PairIP candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          candidates = [
+              ("4.1.15-apk20", "https://www.apk20.com/apk/com.canyua.publisherexpert/download/205"),
+          ]
+          ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36"
+          results = []
+          selected = None
+          for name, url in candidates:
+              out = Path("work") / (name + ".bin")
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent": ua})
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      data = r.read()
+                      ctype = r.headers.get("content-type", "")
+                      final = r.geturl()
+                  out.write_bytes(data)
+                  row = {
+                      "name": name,
+                      "url": url,
+                      "final_url": final,
+                      "bytes": len(data),
+                      "content_type": ctype,
+                      "zip_magic": data[:4] == b"PK\\x03\\x04",
+                  }
+                  results.append(row)
+                  if row["zip_magic"] and len(data) > 5_000_000 and selected is None:
+                      selected = out
+              except Exception as exc:
+                  results.append({"name": name, "url": url, "error": repr(exc)})
+
+          Path("work/acquisition.json").write_text(
+              json.dumps({"candidates": results}, indent=2) + "\n"
+          )
+          if selected is None:
+              raise SystemExit("No runnable public candidate acquired")
+          Path("work/selected.apk").write_bytes(selected.read_bytes())
+          PY
+
+          unzip -t work/selected.apk >/dev/null
+          sha256sum work/selected.apk | tee work/selected.sha256
+
+      - name: Guard protection boundary and writer presence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+
+          p = Path("work/selected.apk")
+          z = zipfile.ZipFile(p)
+          names = z.namelist()
+          scan = [n for n in names if n.endswith(".dex") or n == "AndroidManifest.xml" or n.endswith(".so")]
+          needles = {
+              "pairip": [b"com/pairip", b"com.pairip", b"licensecheck", b"LicenseActivity"],
+              "reader": [b"mspubCore", b"MSPUBDocument", b"libmspub"],
+              "writer": [b"libpubBuilder", b"MSPUBBuilder", b"createPub"],
+          }
+          hits = {k: [] for k in needles}
+          for name in scan:
+              try:
+                  blob = z.read(name).lower()
+              except Exception:
+                  continue
+              for group, pats in needles.items():
+                  for pat in pats:
+                      if pat.lower() in blob:
+                          hits[group].append({"file": name, "needle": pat.decode("ascii", "replace")})
+
+          abis = sorted({
+              n.split("/")[1] for n in names
+              if n.startswith("lib/") and n.count("/") >= 2
+          })
+          report = {
+              "schema": "der/canyua-prepairip-candidate/v1",
+              "abis": abis,
+              "pairip_present": bool(hits["pairip"]),
+              "reader_markers_present": bool(hits["reader"]),
+              "writer_markers_present": bool(hits["writer"]),
+              "marker_hits": hits,
+          }
+          Path("work/candidate-report.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          if report["pairip_present"]:
+              raise SystemExit("Candidate carries PairIP markers; do not proceed")
+          if not report["reader_markers_present"]:
+              raise SystemExit("Candidate lacks expected local PUB reader markers")
+          PY
+
+      - name: Download pinned PUB control
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3             https://raw.githubusercontent.com/apache/poi/74700b5692fd0449031ac6a3c78aec1155d144d5/test-data/publisher/Sample.pub             -o work/Sample.pub
+          echo "6fefdef46b87c767150878dc384549cb2d2ec2ac54de25f8ddb3a5628301107e  work/Sample.pub" | sha256sum -c -
+
+      - name: Run normal Android launch and offline open
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 2
+          ram-size: 4096M
+          heap-size: 1024M
+          disk-size: 8G
+          disable-animations: true
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -no-metrics
+            -gpu swiftshader_indirect
+          script: bash experiments/run-canyua-prepairip-dynamic-discovery.sh
+
+      - name: Upload dynamic discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-prepairip-dynamic-oracle-discovery
+          path: |
+            work/acquisition.json
+            work/selected.sha256
+            work/candidate-report.json
+            work/dynamic/
+          if-no-files-found: warn
+          retention-days: 30
