@@ -86,7 +86,11 @@ jobs:
 
       - name: Install CFB diff dependency
         shell: bash
-        run: python3 -m pip install --disable-pip-version-check olefile
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/canyua-oracle-venv"
+          "$RUNNER_TEMP/canyua-oracle-venv/bin/python" -m pip install --disable-pip-version-check olefile
+          echo "$RUNNER_TEMP/canyua-oracle-venv/bin" >> "$GITHUB_PATH"
 
       - name: Download pinned PUB control
         shell: bash
