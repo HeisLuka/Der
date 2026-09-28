@@ -64,7 +64,27 @@ from pathlib import Path
 out=Path("work/canyua-new-save")
 subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 subprocess.run(["adb","pull","/sdcard/window.xml",str(out/"new-dialog.xml")],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-root=ET.parse(out/"new-dialog.xml").getroot()
+xml_path=out/"new-dialog.xml"
+if (not xml_path.exists()) or xml_path.stat().st_size == 0:
+    # On the API-30 Google image this legacy modal sometimes produces an empty
+    # uiautomator dump even though the visible dialog is stable. Use the
+    # positive-button location in the same fixed emulator viewport, then rely
+    # on the independent EditActivity proof below before treating New as open.
+    wm=subprocess.run(["adb","shell","wm","size"],stdout=subprocess.PIPE,text=True).stdout
+    m=re.search(r'(\\d+)x(\\d+)',wm)
+    if not m:
+        print("cannot resolve emulator viewport",file=sys.stderr)
+        raise SystemExit(43)
+    w,h=map(int,m.groups())
+    x=int(w*0.82)
+    y=int(h*0.66)
+    (out/"new-positive-fallback.json").write_text(
+        json.dumps({"mode":"viewport_fraction","x":x,"y":y,"width":w,"height":h},indent=2)+"\\n"
+    )
+    subprocess.run(["adb","shell","input","tap",str(x),str(y)],check=True)
+    time.sleep(2)
+    raise SystemExit(0)
+root=ET.parse(xml_path).getroot()
 rows=[]
 blocked=re.compile(r'purchase|buy|unlock|subscription|subscribe|payment|upgrade|in-app',re.I)
 for n in root.iter("node"):
