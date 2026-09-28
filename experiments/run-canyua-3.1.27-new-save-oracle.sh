@@ -235,6 +235,153 @@ subprocess.run(["adb","pull",remote,str(root/"output"/"new-save.pub")],check=Tru
 PY
 }
 
+
+export_saved_via_app_share() {
+  python3 <<'PY'
+import json,re,subprocess,time,xml.etree.ElementTree as ET
+from pathlib import Path
+
+out=Path("work/canyua-new-save")
+pkg="com.canyua.publisherexpert"
+
+def dump(tag):
+    subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    p=out/f"{tag}.xml"
+    subprocess.run(["adb","pull","/sdcard/window.xml",str(p)],
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if not p.exists() or p.stat().st_size == 0:
+        return []
+    try:
+        root=ET.parse(p).getroot()
+    except Exception:
+        return []
+    rows=[]
+    for n in root.iter("node"):
+        rows.append({
+            "text":(n.attrib.get("text") or "").strip(),
+            "desc":(n.attrib.get("content-desc") or "").strip(),
+            "rid":(n.attrib.get("resource-id") or "").strip(),
+            "bounds":n.attrib.get("bounds",""),
+            "clickable":n.attrib.get("clickable",""),
+        })
+    (out/f"{tag}.json").write_text(json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+    return rows
+
+def tap_row(r):
+    m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',r.get("bounds",""))
+    if not m:
+        return False
+    x1,y1,x2,y2=map(int,m.groups())
+    subprocess.run(["adb","shell","input","tap",str((x1+x2)//2),str((y1+y2)//2)],check=True)
+    time.sleep(1.5)
+    return True
+
+def resumed(fragment):
+    p=subprocess.run(["adb","shell","dumpsys","activity","activities"],
+                     stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    return fragment in p.stdout
+
+# Leave the already-saved editor through the shipped Back control.
+rows=dump("share-editor")
+backs=[r for r in rows if r["rid"]==f"{pkg}:id/title_back_imageButton"]
+if len(backs)!=1 or not tap_row(backs[0]):
+    raise SystemExit(51)
+
+for _ in range(20):
+    if resumed(f"{pkg}/.MainActivity"):
+        break
+    time.sleep(1)
+else:
+    dump("share-return-main-failed")
+    raise SystemExit(52)
+
+# Select the just-created document in MainActivity.
+rows=dump("share-main")
+titles=[r for r in rows if r["text"].lower() in {"untitled","untitled.pub"}]
+if not titles:
+    # Be tolerant of UI decoration around the document name, but never choose
+    # an unrelated document.
+    titles=[r for r in rows if "untitled" in r["text"].lower()]
+if len(titles)!=1 or not tap_row(titles[0]):
+    raise SystemExit(53)
+
+rows=dump("share-main-selected")
+share=[r for r in rows if r["rid"]==f"{pkg}:id/doc_share"]
+if len(share)!=1 or not tap_row(share[0]):
+    raise SystemExit(54)
+
+# MainActivity.shareDocument() uses normal ACTION_CREATE_DOCUMENT requestCode=2.
+for _ in range(20):
+    if resumed("com.google.android.documentsui"):
+        break
+    time.sleep(1)
+else:
+    dump("share-create-document-not-open")
+    raise SystemExit(55)
+
+rows=dump("share-create-document")
+roots=[r for r in rows if (r["desc"].lower()=="show roots" or r["text"].lower()=="show roots")]
+if len(roots)==1:
+    tap_row(roots[0])
+    rows=dump("share-roots")
+    downloads=[r for r in rows if r["text"].strip().lower()=="downloads"]
+    if downloads:
+        tap_row(downloads[0])
+        rows=dump("share-downloads")
+
+# Accept the app-provided Untitled.pub name in Downloads.
+save_labels={"save","create","done","use this folder","select"}
+save=[]
+for r in rows:
+    label=(r["text"] or r["desc"]).strip().lower()
+    rid=r["rid"].lower()
+    if label in save_labels or rid.endswith("action_menu_save"):
+        if re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',r["bounds"]):
+            save.append(r)
+if not save:
+    # Some DocumentsUI builds only expose the action after a short settle.
+    time.sleep(1)
+    rows=dump("share-downloads-settled")
+    for r in rows:
+        label=(r["text"] or r["desc"]).strip().lower()
+        rid=r["rid"].lower()
+        if label in save_labels or rid.endswith("action_menu_save"):
+            if re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',r["bounds"]):
+                save.append(r)
+if len(save)!=1 or not tap_row(save[0]):
+    raise SystemExit(56)
+
+# If an existing filename collision appears, use the explicit normal replace action.
+time.sleep(1)
+rows=dump("share-after-save-action")
+replace=[r for r in rows if (r["text"] or r["desc"]).strip().lower() in {"replace","overwrite"}]
+if len(replace)==1:
+    tap_row(replace[0])
+
+for _ in range(20):
+    if resumed(f"{pkg}/.MainActivity"):
+        break
+    time.sleep(1)
+
+# The CREATE_DOCUMENT copy is now externally readable; pull the exact result.
+proc=subprocess.run(
+    ["adb","shell","find","/sdcard/Download","-maxdepth","1","-type","f","-iname","Untitled*.pub"],
+    stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True
+)
+cands=[x.strip() for x in proc.stdout.splitlines() if x.strip()]
+if not cands:
+    dump("share-output-not-found")
+    raise SystemExit(57)
+remote=sorted(cands)[-1]
+subprocess.run(["adb","pull",remote,str(out/"output"/"new-save.pub")],check=True)
+(out/"selected-output.json").write_text(json.dumps({
+    "remote":remote,
+    "capture_method":"normal MainActivity Share -> ACTION_CREATE_DOCUMENT after ordinary Save",
+},indent=2,ensure_ascii=False)+"\n")
+PY
+}
+
 echo "=== device ==="
 adb shell getprop ro.product.cpu.abilist | tee "$OUT/abilist.txt"
 echo "native_bridge=$(adb shell getprop ro.dalvik.vm.native.bridge || true)" | tee "$OUT/native-bridge.txt"
@@ -321,6 +468,20 @@ fi
 
 snapshot_pubs "$OUT/pubs-after-save.json"
 capture_new_pub || true
+
+# Canyua's My Documents path can be app-owned on modern Android, so a valid
+# ordinary Save may not appear under /sdcard. If direct external inventory did
+# not see it, use the app's own normal Share -> ACTION_CREATE_DOCUMENT flow to
+# copy the already-saved Untitled.pub into Downloads. This does not invoke a
+# second writer path and does not modify entitlement/protection state.
+if [ ! -f "$OUT/output/new-save.pub" ]; then
+  set +e
+  export_saved_via_app_share > "$OUT/share-capture.stdout" 2> "$OUT/share-capture.stderr"
+  share_rc=$?
+  set -e
+  printf '%s\n' "$share_rc" > "$OUT/share-capture.rc"
+  capture share-capture-final
+fi
 
 if [ -f "$OUT/output/new-save.pub" ]; then
   python3 - <<'PY'
