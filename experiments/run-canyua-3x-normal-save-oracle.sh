@@ -79,24 +79,21 @@ import sys
 from pathlib import Path
 
 out = Path(sys.argv[1])
-roots = [
-    "/sdcard/Download",
-    "/sdcard/Documents",
-    "/sdcard/Android/data/com.canyua.publisherexpert/files",
-]
-
+# Canyua imports external/content URIs by copying them into its own
+# pathOfMyDocuments() location before parsing. Do not assume that location is
+# Downloads/Documents/Android/data: inventory every externally visible PUB so
+# an ordinary Save cannot be missed by watching the ingress file only.
+proc = subprocess.run(
+    ["adb", "shell", "find", "/sdcard", "-type", "f", "-iname", "*.pub"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    text=True,
+)
 paths = []
-for root in roots:
-    proc = subprocess.run(
-        ["adb", "shell", "find", root, "-type", "f"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    for line in proc.stdout.splitlines():
-        p = line.strip()
-        if p.lower().endswith(".pub") and p not in paths:
-            paths.append(p)
+for line in proc.stdout.splitlines():
+    p = line.strip()
+    if p and p not in paths:
+        paths.append(p)
 
 rows = []
 for path in sorted(paths):
@@ -437,6 +434,10 @@ fi
 
 echo "=== pinned offline PUB open ==="
 adb push "$WORK/Sample.pub" /sdcard/Download/CanyuaOracleSample.pub >/dev/null
+# ADB-created files are not always immediately present in DocumentsUI/MediaProvider
+# on Android 11. This is a normal media-scan notification, not an access bypass.
+adb shell am broadcast   -a android.intent.action.MEDIA_SCANNER_SCAN_FILE   -d file:///sdcard/Download/CanyuaOracleSample.pub   >/dev/null 2>&1 || true
+sleep 2
 adb shell settings put global airplane_mode_on 1 || true
 adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true >/dev/null 2>&1 || true
 adb shell svc wifi disable || true
