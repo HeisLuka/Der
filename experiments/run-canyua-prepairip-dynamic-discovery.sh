@@ -66,6 +66,95 @@ for _ in range(8):
 PY
 }
 
+open_via_system_picker() {
+  python3 - <<'PY'
+import json
+import re
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+out = Path("work/dynamic")
+target_name = "CanyuaOracleSample.pub"
+
+def dump(tag):
+    local = out / f"{tag}.xml"
+    subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["adb","pull","/sdcard/window.xml",str(local)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        return ET.parse(local).getroot()
+    except Exception:
+        return None
+
+def rows(root):
+    if root is None:
+        return []
+    return [{
+        "text": (n.attrib.get("text") or "").strip(),
+        "desc": (n.attrib.get("content-desc") or "").strip(),
+        "resource_id": (n.attrib.get("resource-id") or "").strip(),
+        "bounds": n.attrib.get("bounds",""),
+        "clickable": n.attrib.get("clickable",""),
+        "class": n.attrib.get("class",""),
+    } for n in root.iter("node")]
+
+def tap(row):
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', row["bounds"])
+    if not m:
+        return False
+    x1,y1,x2,y2 = map(int,m.groups())
+    subprocess.run(["adb","shell","input","tap",str((x1+x2)//2),str((y1+y2)//2)],check=True)
+    time.sleep(1.5)
+    return True
+
+rs = rows(dump("picker-main"))
+(out/"picker-main.json").write_text(json.dumps(rs,indent=2,ensure_ascii=False)+"\n")
+cloud = [r for r in rs if r["resource_id"] == "com.canyua.publisherexpert:id/menu_cloud"]
+if len(cloud) != 1 or not tap(cloud[0]):
+    print(f"menu_cloud control not uniquely available: {len(cloud)}", file=sys.stderr)
+    sys.exit(45)
+
+opened_roots = False
+for step in range(30):
+    rs = rows(dump(f"picker-step-{step:02d}"))
+    if step < 8:
+        (out/f"picker-step-{step:02d}.json").write_text(
+            json.dumps(rs,indent=2,ensure_ascii=False)+"\n"
+        )
+    target = [r for r in rs if r["text"] == target_name or r["desc"] == target_name]
+    if target and tap(target[0]):
+        print("selected", target_name)
+        sys.exit(0)
+
+    downloads = [
+        r for r in rs
+        if (r["text"].lower() in {"downloads","download"} or
+            r["desc"].lower() in {"downloads","download"})
+        and r["clickable"] == "true"
+    ]
+    if downloads and tap(downloads[0]):
+        continue
+
+    if not opened_roots:
+        roots = [
+            r for r in rs
+            if r["desc"].lower() in {"show roots","open navigation drawer","show navigation drawer"}
+            or r["resource_id"].endswith("/toolbar_navigation_button")
+        ]
+        if roots and tap(roots[0]):
+            opened_roots = True
+            continue
+    time.sleep(0.75)
+
+print("system picker never exposed the pinned PUB", file=sys.stderr)
+sys.exit(46)
+PY
+}
+
 echo "=== device ==="
 adb shell getprop ro.product.model | tee "$RESULTS/device-model.txt" || true
 adb shell getprop ro.product.cpu.abilist | tee "$RESULTS/device-abis.txt" || true
@@ -115,6 +204,11 @@ fi
 
 echo "=== offline local PUB open discovery ==="
 adb push "$WORK/Sample.pub" /sdcard/Download/CanyuaOracleSample.pub >/dev/null
+adb shell am broadcast \
+  -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+  -d file:///sdcard/Download/CanyuaOracleSample.pub \
+  >/dev/null 2>&1 || true
+sleep 2
 
 adb shell settings put global airplane_mode_on 1 || true
 adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true >/dev/null 2>&1 || true
@@ -131,6 +225,34 @@ click_common_dialogs || true
 sleep 4
 capture_state "open-pub"
 
+# Android 11 scoped storage can reject this historical app's direct file://
+# copy even though MainActivity itself launches normally. In that case use
+# Canyua's own shipped menu_cloud -> ACTION_OPEN_DOCUMENT flow, which grants
+# the content URI through DocumentsUI exactly as a user would.
+if ! grep -Eqi 'EditActivity|PageFragment' "$RESULTS/open-pub-activity.txt" "$RESULTS/open-pub-activity-top.txt" 2>/dev/null; then
+  if grep -Eqi 'CanyuaOracleSample\.pub.*EACCES|open failed: EACCES|Permission denied' "$RESULTS/open-pub-logcat.txt" 2>/dev/null; then
+    printf 'direct_file_ingress_eacces\n' > "$RESULTS/direct-file-status.txt"
+  fi
+
+  adb shell am force-stop "$PKG" || true
+  adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 > "$RESULTS/picker-bootstrap-launch.txt" 2>&1 || true
+  sleep 4
+  click_common_dialogs || true
+
+  set +e
+  open_via_system_picker > "$RESULTS/picker-open.txt" 2> "$RESULTS/picker-open.stderr"
+  picker_rc=$?
+  set -e
+  if [ "$picker_rc" -eq 0 ]; then
+    sleep 12
+    click_common_dialogs || true
+    capture_state "open-picker"
+  else
+    printf 'system_picker_ingress_failed_%s\n' "$picker_rc" > "$RESULTS/picker-status.txt"
+    capture_state "picker-failed"
+  fi
+fi
+
 python3 - <<'PY'
 from __future__ import annotations
 
@@ -146,15 +268,28 @@ def text(path: str) -> str:
     return p.read_text(errors="replace") if p.exists() else ""
 
 bootstrap_activity = text("bootstrap-activity.txt") + "\n" + text("bootstrap-activity-top.txt")
-open_activity = text("open-pub-activity.txt") + "\n" + text("open-pub-activity-top.txt")
+direct_activity = text("open-pub-activity.txt") + "\n" + text("open-pub-activity-top.txt")
+picker_activity = text("open-picker-activity.txt") + "\n" + text("open-picker-activity-top.txt")
+open_activity = picker_activity if picker_activity.strip() else direct_activity
 bootstrap_ui = text("bootstrap-ui.xml")
-open_ui = text("open-pub-ui.xml")
-logs = text("open-pub-logcat.txt")
+picker_ui = text("open-picker-ui.xml")
+open_ui = picker_ui if picker_ui.strip() else text("open-pub-ui.xml")
+direct_logs = text("open-pub-logcat.txt")
+picker_logs = text("open-picker-logcat.txt")
+logs = picker_logs if picker_logs.strip() else direct_logs
 
 pairip = bool(re.search(r"pairip|LicenseActivity|license check", bootstrap_activity + bootstrap_ui, re.I))
 editor_surface = bool(re.search(r"EditActivity|PageFragment", open_activity, re.I))
 filename_visible = "CanyuaOracleSample.pub" in open_ui
-parser_hint = bool(re.search(r"pubCoreParse|MSPUB|libmspub", logs, re.I))
+direct_file_eacces = bool(re.search(
+    r"CanyuaOracleSample\.pub.*EACCES|open failed: EACCES|Permission denied",
+    direct_logs,
+    re.I,
+))
+# Do not infer parser execution from symbol/method names printed in stack traces.
+# A positive parse proof requires the editor/page surface or an independently
+# observable document result.
+parser_hint = editor_surface
 crash = bool(re.search(
     r"FATAL EXCEPTION|Fatal signal|SIGSEGV|SIGABRT|ANR in com\.canyua\.publisherexpert|"
     r"Process com\.canyua\.publisherexpert.*has died",
@@ -205,6 +340,8 @@ report = {
     "editor_surface_observed": editor_surface,
     "filename_visible": filename_visible,
     "parser_activity_observed": parser_hint,
+    "direct_file_ingress_eacces": direct_file_eacces,
+    "picker_attempted": bool(text("picker-open.txt") or text("picker-status.txt")),
     "crash_or_anr": crash,
     "candidate_ui_controls": labels[:100],
 }
@@ -219,7 +356,7 @@ adb shell svc wifi enable || true
 
 status="$(cat "$RESULTS/status.txt" 2>/dev/null || true)"
 case "$status" in
-  opened_editor_surface|opened_filename_visible|parser_activity_observed)
+  opened_editor_surface|opened_filename_visible)
     ;;
   *)
     echo "Dynamic PUB open was not proven: $status" >&2
