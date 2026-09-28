@@ -71,7 +71,7 @@ if (not xml_path.exists()) or xml_path.stat().st_size == 0:
     # positive-button location in the same fixed emulator viewport, then rely
     # on the independent EditActivity proof below before treating New as open.
     wm=subprocess.run(["adb","shell","wm","size"],stdout=subprocess.PIPE,text=True).stdout
-    m=re.search(r'(\\d+)x(\\d+)',wm)
+    m=re.search(r'(\d+)x(\d+)',wm)
     if not m:
         print("cannot resolve emulator viewport",file=sys.stderr)
         raise SystemExit(43)
