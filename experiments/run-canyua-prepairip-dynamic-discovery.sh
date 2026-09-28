@@ -72,7 +72,17 @@ adb shell getprop ro.product.cpu.abilist | tee "$RESULTS/device-abis.txt" || tru
 adb shell getprop ro.build.version.release | tee "$RESULTS/android-release.txt" || true
 
 echo "=== install selected pre-PairIP candidate ==="
-adb install -r "$WORK/selected.apk" | tee "$RESULTS/install.txt"
+APK_DIR="$WORK/runtime/runtime-apks"
+mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' | sort)
+if [ "${#APKS[@]}" -eq 0 ]; then
+  echo "No runtime APKs found in $APK_DIR" >&2
+  exit 2
+elif [ "${#APKS[@]}" -eq 1 ]; then
+  adb install -r "${APKS[0]}" | tee "$RESULTS/install.txt"
+else
+  printf '%s\n' "${APKS[@]}" > "$RESULTS/install-apks.txt"
+  adb install-multiple -r "${APKS[@]}" | tee "$RESULTS/install.txt"
+fi
 adb shell dumpsys package "$PKG" > "$RESULTS/package-dumpsys.txt" 2>&1 || true
 
 echo "=== normal launch, no protection bypass ==="
