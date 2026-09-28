@@ -70,6 +70,12 @@ echo "=== device ==="
 adb shell getprop ro.product.model | tee "$RESULTS/device-model.txt" || true
 adb shell getprop ro.product.cpu.abilist | tee "$RESULTS/device-abis.txt" || true
 adb shell getprop ro.build.version.release | tee "$RESULTS/android-release.txt" || true
+{
+  echo "ro.dalvik.vm.native.bridge=$(adb shell getprop ro.dalvik.vm.native.bridge || true)"
+  echo "ro.enable.native.bridge.exec=$(adb shell getprop ro.enable.native.bridge.exec || true)"
+  echo "ro.ndk_translation.version=$(adb shell getprop ro.ndk_translation.version || true)"
+  adb shell 'find /system /vendor /product \( -iname "*ndk_translation*" -o -iname "libnb.so" \) 2>/dev/null | head -100' || true
+} | tee "$RESULTS/native-bridge.txt"
 
 echo "=== install selected pre-PairIP candidate ==="
 APK_DIR="$WORK/runtime/runtime-apks"
