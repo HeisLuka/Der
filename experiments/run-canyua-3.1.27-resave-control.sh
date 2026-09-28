@@ -187,6 +187,135 @@ print(json.dumps(hit,ensure_ascii=False))
 PY
 }
 
+
+open_via_system_picker() {
+  python3 - <<'PY'
+import json
+import re
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+out = Path("work/canyua-3127")
+target_name = "CanyuaOracleSample.pub"
+
+def dump(tag):
+    remote = "/sdcard/window.xml"
+    local = out / f"{tag}.xml"
+    subprocess.run(["adb","shell","uiautomator","dump",remote],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["adb","pull",remote,str(local)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        return ET.parse(local).getroot()
+    except Exception:
+        return None
+
+def rows(root):
+    if root is None:
+        return []
+    result = []
+    for n in root.iter("node"):
+        result.append({
+            "text": (n.attrib.get("text") or "").strip(),
+            "desc": (n.attrib.get("content-desc") or "").strip(),
+            "resource_id": (n.attrib.get("resource-id") or "").strip(),
+            "bounds": n.attrib.get("bounds",""),
+            "clickable": n.attrib.get("clickable",""),
+            "class": n.attrib.get("class",""),
+        })
+    return result
+
+def center(row):
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', row["bounds"])
+    if not m:
+        return None
+    x1,y1,x2,y2 = map(int,m.groups())
+    return ((x1+x2)//2, (y1+y2)//2)
+
+def tap(row):
+    p = center(row)
+    if p is None:
+        return False
+    subprocess.run(["adb","shell","input","tap",str(p[0]),str(p[1])], check=True)
+    time.sleep(1.5)
+    return True
+
+root = dump("picker-main")
+rs = rows(root)
+(out/"picker-main.json").write_text(json.dumps(rs,indent=2,ensure_ascii=False)+"\n")
+cloud = [r for r in rs if r["resource_id"] == "com.canyua.publisherexpert:id/menu_cloud"]
+if len(cloud) != 1 or not tap(cloud[0]):
+    print(f"menu_cloud control not uniquely available: {len(cloud)}", file=sys.stderr)
+    sys.exit(45)
+
+opened_roots = False
+clicked_downloads = False
+for step in range(30):
+    root = dump(f"picker-step-{step:02d}")
+    rs = rows(root)
+    if step < 8:
+        (out/f"picker-step-{step:02d}.json").write_text(
+            json.dumps(rs,indent=2,ensure_ascii=False)+"\n"
+        )
+
+    target = [
+        r for r in rs
+        if (r["text"] == target_name or r["desc"] == target_name)
+    ]
+    if target:
+        if tap(target[0]):
+            print("selected", target_name)
+            sys.exit(0)
+
+    # DocumentsUI usually starts in Recents. If the PUB is not there, open
+    # the roots drawer and choose Downloads. Match labels/descriptions rather
+    # than fixed coordinates so this survives AOSP/Google DocumentsUI variants.
+    if not opened_roots:
+        roots = [
+            r for r in rs
+            if r["desc"].lower() in {
+                "show roots", "open navigation drawer", "show navigation drawer"
+            }
+            or r["resource_id"].endswith("/toolbar_navigation_button")
+        ]
+        if roots and tap(roots[0]):
+            opened_roots = True
+            continue
+
+    downloads = [
+        r for r in rs
+        if (r["text"].lower() in {"downloads","download"}
+            or r["desc"].lower() in {"downloads","download"})
+        and r["clickable"] == "true"
+    ]
+    if downloads and (not clicked_downloads or step > 8):
+        if tap(downloads[0]):
+            clicked_downloads = True
+            continue
+
+    # Some DocumentsUI versions expose the roots icon only as the first
+    # clickable ImageButton in the toolbar.
+    if not opened_roots:
+        fallback = [
+            r for r in rs
+            if r["clickable"] == "true"
+            and r["class"].endswith("ImageButton")
+            and "documentsui" in r["resource_id"].lower()
+        ]
+        if fallback and tap(fallback[0]):
+            opened_roots = True
+            continue
+
+    time.sleep(0.75)
+
+print("system picker never exposed the pinned PUB", file=sys.stderr)
+sys.exit(46)
+PY
+}
+
 echo "=== device/native bridge ==="
 {
   adb shell getprop ro.product.model || true
@@ -262,8 +391,52 @@ if ui_has_purchase_surface "$OUT/open-ui.xml"; then
 fi
 
 if ! grep -Eqi 'EditActivity|PageFragment'     "$OUT/open-activity.txt" "$OUT/open-activity-top.txt" 2>/dev/null; then
-  printf 'editor_surface_not_proven\n' | tee "$OUT/status.txt"
-  exit 0
+  echo "=== retry through shipped in-app ACTION_OPEN_DOCUMENT path ==="
+  adb shell am force-stop "$PKG" || true
+  adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1     > "$OUT/picker-bootstrap-launch.txt" 2>&1 || true
+  sleep 4
+
+  set +e
+  click_common_dialogs
+  picker_common_rc=$?
+  set -e
+  if [ "$picker_common_rc" -eq 42 ]; then
+    printf 'purchase_surface_observed_before_picker\n' | tee "$OUT/status.txt"
+    capture "picker-purchase"
+    exit 0
+  fi
+
+  set +e
+  open_via_system_picker > "$OUT/picker-open.txt" 2> "$OUT/picker-open.stderr"
+  picker_rc=$?
+  set -e
+  if [ "$picker_rc" -ne 0 ]; then
+    printf 'system_picker_ingress_failed_%s\n' "$picker_rc" | tee "$OUT/status.txt"
+    capture "picker-failed"
+    exit 0
+  fi
+
+  sleep 12
+  set +e
+  click_common_dialogs
+  picker_common_rc=$?
+  set -e
+  if [ "$picker_common_rc" -eq 42 ]; then
+    printf 'purchase_surface_observed_after_picker_open\n' | tee "$OUT/status.txt"
+    capture "picker-open-purchase"
+    exit 0
+  fi
+
+  capture "open-picker"
+  if ui_has_purchase_surface "$OUT/open-picker-ui.xml"; then
+    printf 'purchase_surface_observed_after_picker_open\n' | tee "$OUT/status.txt"
+    exit 0
+  fi
+
+  if ! grep -Eqi 'EditActivity|PageFragment'       "$OUT/open-picker-activity.txt" "$OUT/open-picker-activity-top.txt" 2>/dev/null; then
+    printf 'editor_surface_not_proven_after_picker\n' | tee "$OUT/status.txt"
+    exit 0
+  fi
 fi
 
 echo "=== one ordinary no-op Save ==="
