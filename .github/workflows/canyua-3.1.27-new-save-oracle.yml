@@ -91,6 +91,14 @@ jobs:
           mkdir -p work/canyua-new-save/analysis
           status="$(cat work/canyua-new-save/status.txt 2>/dev/null || printf 'runtime_step_failed_before_status')"
           printf '%s\n' "$status" > work/canyua-new-save/analysis/status.txt
+          printf 'behavioral_status=%s\n' "$status"
+          if [ -f work/canyua-new-save/share-capture.rc ]; then
+            printf 'share_capture_rc=%s\n' "$(cat work/canyua-new-save/share-capture.rc)"
+          fi
+          if [ -s work/canyua-new-save/share-capture.stderr ]; then
+            echo '--- share-capture.stderr ---'
+            cat work/canyua-new-save/share-capture.stderr
+          fi
 
           if [ -f work/canyua-new-save/output/new-save.pub ]; then
             python3 experiments/probe-canyua-contents-profile.py \
