@@ -43,7 +43,7 @@ jobs:
 
           : > work/reports/candidate-attempts.tsv
           selected=''
-          for ver in 4.1.15 4.1.14 4.1.12 4.1.11 4.1.10 3.1.35; do
+          for ver in 4.1.15 4.1.14 4.1.12 4.1.11 4.1.10 3.1.35 3.1.21 3.1.16; do
             outdir="$PWD/work/acquire/$ver"
             mkdir -p "$outdir"
 
