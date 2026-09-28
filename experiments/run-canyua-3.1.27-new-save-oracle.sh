@@ -327,15 +327,54 @@ else:
     dump("share-return-main-failed")
     raise SystemExit(52)
 
-# Select the just-created document in MainActivity.
+# Enter the shipped MainActivity document edit/selection mode. A normal tap on
+# the document tile opens it in EditActivity, so selection must be proven by the
+# product UI before doc_share is used.
 rows=dump("share-main")
 titles=[r for r in rows if r["text"].lower() in {"untitled","untitled.pub"}]
-if not titles:
-    # Be tolerant of UI decoration around the document name, but never choose
-    # an unrelated document.
-    titles=[r for r in rows if "untitled" in r["text"].lower()]
-if len(titles)!=1 or not tap_row(titles[0]):
+if len(titles)!=1:
     raise SystemExit(53)
+edit_controls=[r for r in rows if r["rid"]==f"{pkg}:id/menu_edit"]
+if len(edit_controls)!=1 or not tap_row(edit_controls[0]):
+    raise SystemExit(59)
+
+# Resolve the exact clickable ancestor of the Untitled.pub name in the edit-mode
+# hierarchy rather than tapping the non-clickable title text or guessing coords.
+subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],
+               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+edit_xml=out/"share-main-edit-mode.xml"
+subprocess.run(["adb","pull","/sdcard/window.xml",str(edit_xml)],
+               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+try:
+    root=ET.parse(edit_xml).getroot()
+except Exception:
+    raise SystemExit(60)
+
+parents={child:parent for parent in root.iter() for child in parent}
+name_nodes=[
+    n for n in root.iter("node")
+    if (n.attrib.get("text") or "").strip().lower() in {"untitled","untitled.pub"}
+]
+if len(name_nodes)!=1:
+    raise SystemExit(60)
+node=name_nodes[0]
+target=None
+while node in parents:
+    node=parents[node]
+    if node.attrib.get("clickable")=="true":
+        target={
+            "text":(node.attrib.get("text") or "").strip(),
+            "desc":(node.attrib.get("content-desc") or "").strip(),
+            "rid":(node.attrib.get("resource-id") or "").strip(),
+            "bounds":node.attrib.get("bounds",""),
+            "clickable":node.attrib.get("clickable",""),
+        }
+        break
+if target is None or not tap_row(target):
+    raise SystemExit(60)
+(out/"share-selection-target.json").write_text(
+    json.dumps(target,indent=2,ensure_ascii=False)+"\n"
+)
 
 rows=dump("share-main-selected")
 share=[r for r in rows if r["rid"]==f"{pkg}:id/doc_share"]
