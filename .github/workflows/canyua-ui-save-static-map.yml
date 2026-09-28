@@ -58,6 +58,22 @@ jobs:
           printf '%s\n' "$BASE" > work/base-apk.txt
           sha256sum "$BASE" > work/base-apk.sha256
 
+      - name: Try public historical 4.1.15 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://www.apk20.com/apk/com.canyua.publisherexpert/download/205'
+          if curl -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/153 Safari/537.36' \
+              -L --fail --retry 2 --connect-timeout 20 \
+              "$URL" -o work/canyua-4.1.15.apk \
+              && unzip -t work/canyua-4.1.15.apk >/dev/null 2>&1; then
+            sha256sum work/canyua-4.1.15.apk > work/historical-apk.sha256
+            printf 'available\n' > work/historical-status.txt
+          else
+            rm -f work/canyua-4.1.15.apk
+            printf 'unavailable\n' > work/historical-status.txt
+          fi
+
       - name: Decompile base APK
         shell: bash
         run: |
@@ -66,6 +82,10 @@ jobs:
           jadx --show-bad-code --no-debug-info -d work/jadx "$BASE" >/tmp/jadx.log 2>&1 || true
           tail -n 100 /tmp/jadx.log > work/report/jadx.log
           test -f work/jadx/sources/com/canyua/publisherexpert/EditActivity.java
+          if [ -f work/canyua-4.1.15.apk ]; then
+            jadx --show-bad-code --no-debug-info -d work/jadx-4x work/canyua-4.1.15.apk >/tmp/jadx-4x.log 2>&1 || true
+            tail -n 100 /tmp/jadx-4x.log > work/report/jadx-4x.log
+          fi
 
       - name: Build save/export control-flow map
         shell: bash
@@ -93,6 +113,24 @@ jobs:
               work/jadx/resources/res/values/public.xml 2>/dev/null || true
           } > "$OUT"
 
+          if [ -f work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java ]; then
+            {
+              echo
+              echo '## Historical 4.1.15 EditActivity symbol hits'
+              rg -n -C 12 \
+                'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
+                work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java || true
+              echo
+              echo '## Historical 4.1.15 relevant resources'
+              rg -n -C 3 \
+                'save|Save|export|Export|publisher|Publisher|document_converter|open_in_pdf|Microsoft Office Publisher' \
+                work/jadx-4x/resources/res/menu \
+                work/jadx-4x/resources/res/layout \
+                work/jadx-4x/resources/res/values/strings.xml \
+                work/jadx-4x/resources/res/values/public.xml 2>/dev/null || true
+            } >> "$OUT"
+          fi
+
           python3 - <<'PY'
           import json
           import re
@@ -107,6 +145,8 @@ jobs:
               if p.exists():
                   resources += p.read_text(errors="replace") + "\n"
 
+          hist_path = Path("work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java")
+          hist = hist_path.read_text(errors="replace") if hist_path.exists() else ""
           facts = {
               "schema": "der/canyua-ui-save-static-map/v1",
               "version_scope": "Canyua 5.1.1 retained package",
@@ -115,6 +155,13 @@ jobs:
               "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\\.pub"', edit)),
               "create_pub_mentions": len(re.findall(r"createPub", edit)),
               "has_document_converter_resource": "document_converter" in resources,
+              "historical_4_1_15_available": bool(hist),
+              "historical_4_1_15": {
+                  "has_save_prompt": bool(re.search(r"save_save|save_do_not_save", hist)) if hist else None,
+                  "document_converter_checks": len(re.findall(r"INAPP_DOCUMENT_CONVERTER", hist)) if hist else None,
+                  "pub_extension_assignments": len(re.findall(r'_exportedName\\s*\\+=\\s*"\\.pub"', hist)) if hist else None,
+                  "create_pub_mentions": len(re.findall(r"createPub", hist)) if hist else None,
+              },
               "boundary": (
                   "Static evidence maps 5.1.1 control flow only. Purchase checks must not be bypassed, "
                   "and historical pre-PairIP builds require their own runtime/static confirmation."
@@ -133,6 +180,8 @@ jobs:
           name: canyua-ui-save-static-map
           path: |
             work/base-apk.sha256
+            work/historical-apk.sha256
+            work/historical-status.txt
             work/report/
           if-no-files-found: warn
           retention-days: 30
