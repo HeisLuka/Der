@@ -70,9 +70,18 @@ def main():
                       "unique_texts":sorted(set(texts)),"payload_hashes":len({f["sha256"] for f in present}),
                       "child_schemas":Counter(f.get("child_schema","") for f in present if f.get("child_schema") is not None).most_common(20)})
     schemas=Counter("|".join("%02X:%02X:%d"%(f["id"],f["type"],f["length"]) for f in r["fields"]) for r in rows)
-    report={"templates":len(rows),"errors":errors,"lengths":Counter(r["length"] for r in rows).most_common(),"hash_count":len({r["hash"] for r in rows}),"schema_count":len(schemas),"schemas":schemas.most_common(),"fields":stats}
+    cpo_matches=0
+    cpo_pairs=Counter()
+    for r in rows:
+        by={f["id"]:f for f in r["fields"]}
+        cpo=by[0x01]["value"]
+        count=by[0x02].get("child_count")
+        cpo_pairs[(cpo,count)]+=1
+        cpo_matches+=cpo==count
+    report={"templates":len(rows),"errors":errors,"lengths":Counter(r["length"] for r in rows).most_common(),"hash_count":len({r["hash"] for r in rows}),"schema_count":len(schemas),"schemas":schemas.most_common(),"fields":stats,
+            "cpo_count_matches":cpo_matches,"cpo_pairs":[{"cpo":a,"count":b,"n":n} for (a,b),n in cpo_pairs.most_common()]}
     a.out.mkdir(parents=True,exist_ok=True);(a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
-    lines=["# PAGE seq266 matrix","", "- templates: **%d**"%len(rows),"- lengths: **%s**"%report["lengths"],"- hashes: **%d**"%report["hash_count"],"- schemas: **%d**"%report["schema_count"],"","## Fields",""]
+    lines=["# PAGE seq266 matrix","", "- templates: **%d**"%len(rows),"- lengths: **%s**"%report["lengths"],"- hashes: **%d**"%report["hash_count"],"- schemas: **%d**"%report["schema_count"],"- CPo == Rgohpo count: **%d/%d**"%(report["cpo_count_matches"],len(rows)),"- CPo/count pairs: **%s**"%report["cpo_pairs"],"","## Fields",""]
     for s in stats:
         lines.append("- 0x%02X: present=%d/%d types=%s lengths=%s unique_values=%s payload_hashes=%d texts=%s"%(s["id"],s["present"],len(rows),s["types"],s["lengths"],s["unique_values"],s["payload_hashes"],s["unique_texts"]))
         if s["top_values"]:lines.append("  - values: %s"%s["top_values"])
