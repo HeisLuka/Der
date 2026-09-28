@@ -44,13 +44,23 @@ def main():
           c=contents(z.read(name));directory=refs(mod,c);byseq={r["seq"]:r for r in directory};physical=sorted(directory,key=lambda r:r["off"]);rank={r["seq"]:i for i,r in enumerate(physical)}
           p=byseq[266];pf=page_fields(mod,c,p);i=rank[266];nxt=physical[i+1]
           wr=byseq[pf["web"]];fr=byseq[pf["form"]]
+          wlen=int.from_bytes(c[wr["off"]:wr["off"]+4],"little")
+          flen=int.from_bytes(c[fr["off"]:fr["off"]+4],"little")
+          wraw=c[wr["off"]:wr["off"]+wlen]
+          fraw=c[fr["off"]:fr["off"]+flen]
+          rel=name[len(TEMPLATE_PREFIX):]
+          parts=rel.split("/")
+          category=parts[0] if len(parts)>1 else ""
+          subcategory=parts[1] if len(parts)>2 else ""
           object_ranks=[rank[x] for x in pf["objects"] if x in rank]
           controlling_rank=rank.get(pf["controlling"])
           service_ranks=sorted([rank[pf["web"]],rank[pf["form"]]])
           rows.append({
-            "template":name,
+            "template":name,"category":category,"subcategory":subcategory,
             "object_count":len(pf["objects"]),
             "web":pf["web"],"form":pf["form"],"controlling":pf["controlling"],
+            "web_len":wlen,"form_len":flen,
+            "web_sha256":__import__("hashlib").sha256(wraw).hexdigest(),"form_sha256":__import__("hashlib").sha256(fraw).hexdigest(),
             "web_type":wr["type"],"form_type":fr["type"],"web_parent":wr["parent"],"form_parent":fr["parent"],
             "web_form_delta":pf["form"]-pf["web"],"web_form_abs_delta":abs(pf["form"]-pf["web"]),
             "web_in_objects":pf["web"] in pf["objects"],"form_in_objects":pf["form"] in pf["objects"],"controlling_in_objects":pf["controlling"] in pf["objects"],
@@ -78,11 +88,22 @@ def main():
     keys=["object_count","web_form_delta","web_form_abs_delta","web_type","form_type","web_parent","form_parent","web_in_objects","form_in_objects","controlling_in_objects","next_seq","next_type","next_parent","web_physical_rank_delta","form_physical_rank_delta","service_pair_phys_adjacent","service_pair_first_rank_delta","service_pair_after_all_rgohpo","service_pair_after_controlling","service_pair_last_to_rgohpo_first_rank_gap","service_pair_first_seq","service_pair_last_seq","rgohpo_min_seq","rgohpo_max_seq","service_last_to_rgohpo_min_seq_gap","rgohpo_min_rank_delta","rgohpo_max_rank_delta","rgohpo_phys_span","rgohpo_phys_contiguous","controlling_rank_delta","seq267_type","seq267_parent","seq267_phys_delta","seq268_type","seq268_parent","seq268_phys_delta"]
     hist={k:Counter(r[k] for r in rows).most_common() for k in keys}
     branches=Counter((r["next_seq"],r["next_type"],r["next_parent"],r["web_physical_rank_delta"],r["form_physical_rank_delta"],r["web_form_delta"]) for r in rows)
+    branch_labels={True:"immediate",False:"deferred"}
+    category_by_branch={}
+    service_profiles_by_branch={}
+    for immediate in (True,False):
+        subset=[r for r in rows if r["next_seq"]==267] if immediate else [r for r in rows if r["next_seq"]!=267]
+        category_by_branch[branch_labels[immediate]]=Counter((r["category"],r["subcategory"]) for r in subset).most_common()
+        service_profiles_by_branch[branch_labels[immediate]]=Counter((r["web_len"],r["web_sha256"],r["form_len"],r["form_sha256"]) for r in subset).most_common()
     error_hist=Counter(e["error"] for e in errors).most_common()
-    report={"templates":len(rows),"source_templates":len(rows)+len(errors),"errors":errors,"error_hist":error_hist,"hist":hist,"branches":[{"next_seq":k[0],"next_type":k[1],"next_parent":k[2],"web_rank_delta":k[3],"form_rank_delta":k[4],"form_minus_web":k[5],"count":v} for k,v in branches.most_common()],"rows":rows}
+    report={"templates":len(rows),"source_templates":len(rows)+len(errors),"errors":errors,"error_hist":error_hist,"hist":hist,"category_by_branch":category_by_branch,"service_profiles_by_branch":service_profiles_by_branch,"branches":[{"next_seq":k[0],"next_type":k[1],"next_parent":k[2],"web_rank_delta":k[3],"form_rank_delta":k[4],"form_minus_web":k[5],"count":v} for k,v in branches.most_common()],"rows":rows}
     a.out.mkdir(parents=True,exist_ok=True);(a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
     lines=["# PAGE266 allocation/order profile","", "- analyzed: **%d / %d**"%(len(rows),len(rows)+len(errors)),"- errors: **%s**"%error_hist,"","## Histograms",""]
     for k in keys:lines.append("- %s: **%s**"%(k,hist[k][:20]))
+    lines+=["","## Category by branch",""]
+    for branch,data in category_by_branch.items():lines.append("- %s: **%s**"%(branch,data[:40]))
+    lines+=["","## Service payload profiles by branch",""]
+    for branch,data in service_profiles_by_branch.items():lines.append("- %s: **%s**"%(branch,data[:20]))
     lines+=["","## Branches",""]
     for b in report["branches"][:30]:lines.append("- %s"%b)
     (a.out/"SUMMARY.md").write_text("\n".join(lines)+"\n",encoding="utf-8");print((a.out/"SUMMARY.md").read_text(encoding="utf-8"))
