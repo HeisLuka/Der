@@ -161,6 +161,19 @@ def hits(rr):
 rr=rows(dump("save-search-initial"))
 hs=hits(rr)
 if len(hs)!=1:
+    file_controls=[
+        r for r in rr
+        if r["resource_id"]=="com.canyua.publisherexpert:id/title_file_imageButton"
+    ]
+    if len(file_controls)==1:
+        m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',file_controls[0]["bounds"])
+        if m:
+            x1,y1,x2,y2=map(int,m.groups())
+            subprocess.run(["adb","shell","input","tap",str((x1+x2)//2),str((y1+y2)//2)],check=True)
+            time.sleep(1)
+            rr=rows(dump("save-search-file-popup"))
+            hs=hits(rr)
+if len(hs)!=1:
     subprocess.run(["adb","shell","input","keyevent","82"],check=False)
     time.sleep(1)
     rr=rows(dump("save-search-menu"))
