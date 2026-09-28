@@ -35,8 +35,8 @@ def validate(apk):
                 profile=prof,
             )
             off,raw,model,fields=doc.parse_model(base,c)
-            generated=prefix+doc.build_document(model)
-            expected=c[:off+len(raw)]
+            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"
+            expected=c[:off+len(raw)+8]
             if len(prefix)!=off or generated!=expected:
                 lim=min(len(generated),len(expected))
                 at=next((i for i in range(lim) if generated[i]!=expected[i]),lim)
