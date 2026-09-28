@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "experiments/analyze-canyua-page266.py"
+      - "experiments/generate-pub2c-page266.py"
       - ".github/workflows/canyua-page266.yml"
   workflow_dispatch:
 
@@ -42,6 +43,7 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check olefile
           python3 experiments/analyze-canyua-page266.py work/base.apk --out work/page266
+          python3 experiments/generate-pub2c-page266.py work/base.apk
       - name: Print summary
         run: cat work/page266/SUMMARY.md
       - uses: actions/upload-artifact@v4
