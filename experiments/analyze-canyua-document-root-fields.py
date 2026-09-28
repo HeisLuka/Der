@@ -26,6 +26,13 @@ def first_document(mod,c):
         item={"id":b["id"],"type":b["type"],"length":b["data_length"],"value":b["value"]}
         payload=raw[b["payload_offset"]:b["end"]]
         item["payload_sha256"]=hashlib.sha256(payload).hexdigest()
+        item["payload_hex"]=payload.hex()
+        if b["id"]==0x12 and b["type"]==0x88:
+            try:
+                dims=mod._children(raw,b)
+                item["dimension_values"]=[x["value"] for x in dims if x["id"] in (0x01,0x02)]
+            except Exception:
+                pass
         if b["type"] in (0x88,0x90,0xA0):
             try:
                 ch=mod._children(raw,b)
@@ -64,6 +71,8 @@ def main():
           "unique_values":len(set(vals)) if vals else None,
           "top_values":collections.Counter(vals).most_common(20) if vals else [],
           "payload_hashes":len(hashes),"top_payload_hashes":hashes.most_common(5),
+          "constant_payload_hex":present[0].get("payload_hex") if len(hashes)==1 and present else None,
+          "dimension_values":collections.Counter(tuple(f.get("dimension_values",[])) for f in present if f.get("dimension_values")).most_common(20),
           "child_schema_count":len(child_schemas),"top_child_schemas":child_schemas.most_common(10),
           "page_count_histogram":dict(page_counts),
         })
@@ -85,6 +94,8 @@ def main():
         lines.append(f"- field 0x{s['id']:02X}: present **{s['present']}/{len(rows)}**, types={s['types']}, lengths={s['lengths']}, unique_values={s['unique_values']}, payload_hashes={s['payload_hashes']}, page_counts={s['page_count_histogram']}")
         if s["top_values"]: lines.append(f"  - top values: {s['top_values']}")
         if s["top_child_schemas"]: lines.append(f"  - child schemas: {s['top_child_schemas'][:3]}")
+        if s.get("constant_payload_hex") is not None: lines.append(f"  - constant payload hex: {s['constant_payload_hex']}")
+        if s.get("dimension_values"): lines.append(f"  - dimension values: {s['dimension_values']}")
     (a.out/"SUMMARY.md").write_text("\n".join(lines)+"\n",encoding="utf-8")
     print((a.out/"SUMMARY.md").read_text(encoding="utf-8"))
     return 0
