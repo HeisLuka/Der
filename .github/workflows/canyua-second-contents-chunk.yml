@@ -1,0 +1,51 @@
+name: Profile second PUB Contents chunk
+
+on:
+  push:
+    paths:
+      - "experiments/analyze-canyua-second-contents-chunk.py"
+      - ".github/workflows/canyua-second-contents-chunk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find package artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=package-canyua-publisher&per_page=20" --jq '.artifacts | map(select(.expired == false)) | sort_by(.created_at) | reverse | .[0].id')"
+          test -n "$ID"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+      - name: Download package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/package
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > work/package.zip
+          unzip -q work/package.zip -d work/package
+          XAPK="$(find work/package -type f -name '*.xapk' -print -quit)"
+          test -n "$XAPK"
+          unzip -p "$XAPK" com.canyua.publisherexpert.apk > work/base.apk
+      - name: Analyze second Contents chunk
+        run: |
+          python3 -m pip install --disable-pip-version-check olefile
+          python3 experiments/analyze-canyua-second-contents-chunk.py work/base.apk --out work/second-chunk
+      - name: Print summary
+        run: cat work/second-chunk/SUMMARY.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canyua-second-contents-chunk-profile
+          path: work/second-chunk/
+          retention-days: 30
