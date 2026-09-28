@@ -159,6 +159,29 @@ if purchase_present(rows):
 
 hits=exact_save(rows)
 if len(hits) != 1:
+    file_controls=[
+        r for r in rows
+        if r["resource_id"]=="com.canyua.publisherexpert:id/title_file_imageButton"
+    ]
+    if len(file_controls)==1:
+        m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',file_controls[0]["bounds"])
+        if m:
+            x1,y1,x2,y2=map(int,m.groups())
+            subprocess.run(
+                ["adb","shell","input","tap",str((x1+x2)//2),str((y1+y2)//2)],
+                check=True,
+            )
+            time.sleep(1)
+            root=dump("save-search-file-popup")
+            rows=nodes(root)
+            (out/"save-search-file-popup.json").write_text(
+                json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+            )
+            if purchase_present(rows):
+                print("purchase surface appeared while opening File popup", file=sys.stderr)
+                sys.exit(42)
+            hits=exact_save(rows)
+if len(hits) != 1:
     subprocess.run(["adb","shell","input","keyevent","82"])
     time.sleep(1)
     root=dump("save-search-menu")
