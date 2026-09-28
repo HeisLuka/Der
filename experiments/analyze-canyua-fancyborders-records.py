@@ -51,6 +51,16 @@ def summarize_record(mod, raw, b):
                 ch=mod._children(raw,x)
                 item["child_count"]=len(ch)
                 item["child_schema"]="|".join("%02X:%02X:%d"%(y["id"],y["type"],y["data_length"]) for y in ch)
+                item["children"]=[]
+                for y in ch:
+                    yp=raw[y["payload_offset"]:y["end"]]
+                    yi={"id":y["id"],"type":y["type"],"length":y["data_length"],"value":y["value"],"sha256":hashlib.sha256(yp).hexdigest()}
+                    if y["type"]==0xC0:
+                        try:
+                            yi["text"]=yp[:-2].decode("utf-16le") if yp.endswith(b"\\x00\\x00") else yp.decode("utf-16le")
+                        except Exception:
+                            pass
+                    item["children"].append(yi)
             except Exception as exc:
                 item["child_error"]=repr(exc)
         out.append(item)
@@ -101,16 +111,32 @@ def main():
         for r in d["records"]:
             for f in r["fields"]:
                 key="0x%02X"%f["id"]; field_stats.setdefault(key,[]).append(f)
+    inner_stats={}
+    for d in docs:
+        for r in d["records"]:
+            for f in r["fields"]:
+                for ch in f.get("children",[]):
+                    key="0x%02X"%ch["id"]
+                    inner_stats.setdefault(key,[]).append(ch)
+    inner=[]
+    for key,vals in sorted(inner_stats.items()):
+        nums=[v["value"] for v in vals if v["value"] is not None]
+        texts=[v.get("text") for v in vals if v.get("text") is not None]
+        inner.append({"field":key,"count":len(vals),"types":Counter(v["type"] for v in vals).most_common(),"lengths":Counter(v["length"] for v in vals).most_common(),"unique_values":len(set(nums)) if nums else None,"top_values":Counter(nums).most_common(30) if nums else [],"unique_texts":sorted(set(texts)),"payload_hashes":len({v["sha256"] for v in vals})})
     fs=[]
     for key,vals in sorted(field_stats.items()):
         nums=[v["value"] for v in vals if v["value"] is not None]
         texts=[v.get("text") for v in vals if v.get("text") is not None]
         fs.append({"field":key,"count":len(vals),"types":Counter(v["type"] for v in vals).most_common(),"lengths":Counter(v["length"] for v in vals).most_common(),"unique_values":len(set(nums)) if nums else None,"top_values":Counter(nums).most_common(20) if nums else [],"unique_texts":sorted(set(texts)),"payload_hashes":len({v["sha256"] for v in vals})})
-    report={"documents":len(docs),"errors":errors,"profiles":Counter(d["profile"] for d in docs).most_common(),"positions":position,"field_stats":fs,"docs":docs}
+    report={"documents":len(docs),"errors":errors,"profiles":Counter(d["profile"] for d in docs).most_common(),"positions":position,"field_stats":fs,"inner_field_stats":inner,"docs":docs}
     a.out.mkdir(parents=True,exist_ok=True)
     (a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
     lines=["# FancyBorders record-level profile","", "- documents: **%d**"%len(docs), "- profiles: **%s**"%report["profiles"], "", "## Positions",""]
     for p in position: lines.append("- #%d lengths=%s schema_count=%d profile_lengths=%s"%(p["index"],p["lengths"],p["schema_count"],p["profile_lengths"]))
+    lines+=["","## Inner record fields",""]
+    for s in inner:
+        lines.append("- %s count=%d types=%s lengths=%s unique_values=%s payload_hashes=%d texts=%s"%(s["field"],s["count"],s["types"],s["lengths"],s["unique_values"],s["payload_hashes"],s["unique_texts"]))
+        if s["top_values"]: lines.append("  - values: %s"%s["top_values"])
     lines+=["","## Field stats",""]
     for s in fs:
         lines.append("- %s count=%d types=%s lengths=%s unique_values=%s payload_hashes=%d texts=%s"%(s["field"],s["count"],s["types"],s["lengths"],s["unique_values"],s["payload_hashes"],s["unique_texts"]))
