@@ -94,6 +94,10 @@ else
 fi
 adb shell dumpsys package "$PKG" > "$RESULTS/package-dumpsys.txt" 2>&1 || true
 
+# Normal storage permissions declared by the historical app; no entitlement state is changed.
+adb shell pm grant "$PKG" android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1 || true
+adb shell pm grant "$PKG" android.permission.WRITE_EXTERNAL_STORAGE >/dev/null 2>&1 || true
+
 echo "=== normal launch, no protection bypass ==="
 adb logcat -c || true
 adb shell am force-stop "$PKG" || true
@@ -118,10 +122,10 @@ adb shell svc wifi disable || true
 adb shell svc data disable || true
 sleep 2
 
-URI='content://com.android.externalstorage.documents/document/primary%3ADownload%2FCanyuaOracleSample.pub'
+URI='file:///sdcard/Download/CanyuaOracleSample.pub'
 adb logcat -c || true
 adb shell am force-stop "$PKG" || true
-adb shell am start -W   -n "$MAIN"   -a android.intent.action.VIEW   -d "$URI"   -t application/x-mspublisher   --grant-read-uri-permission > "$RESULTS/open-pub.txt" 2>&1 || true
+adb shell am start -W   -n "$MAIN"   -a android.intent.action.VIEW   -d "$URI"   -t application/x-mspublisher   > "$RESULTS/open-pub.txt" 2>&1 || true
 sleep 10
 click_common_dialogs || true
 sleep 4
@@ -212,3 +216,13 @@ PY
 adb shell settings put global airplane_mode_on 0 || true
 adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false >/dev/null 2>&1 || true
 adb shell svc wifi enable || true
+
+status="$(cat "$RESULTS/status.txt" 2>/dev/null || true)"
+case "$status" in
+  opened_editor_surface|opened_filename_visible|parser_activity_observed)
+    ;;
+  *)
+    echo "Dynamic PUB open was not proven: $status" >&2
+    exit 3
+    ;;
+esac
