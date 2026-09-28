@@ -101,7 +101,7 @@ jobs:
             echo
             echo '## EditActivity symbol hits'
             rg -n -C 12 \
-              'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
+              'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
               "$EDIT" || true
             echo
             echo '## Relevant menus/layouts/strings'
@@ -118,7 +118,7 @@ jobs:
               echo
               echo '## Historical 4.1.15 EditActivity symbol hits'
               rg -n -C 12 \
-                'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
+                'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
                 work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java || true
               echo
               echo '## Historical 4.1.15 relevant resources'
@@ -152,14 +152,14 @@ jobs:
               "version_scope": "Canyua 5.1.1 retained package",
               "has_save_prompt": bool(re.search(r"save_save|save_do_not_save", edit)),
               "document_converter_checks": len(re.findall(r"INAPP_DOCUMENT_CONVERTER", edit)),
-              "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\\.pub"', edit)),
+              "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\.pub"', edit)),
               "create_pub_mentions": len(re.findall(r"createPub", edit)),
               "has_document_converter_resource": "document_converter" in resources,
               "historical_4_1_15_available": bool(hist),
               "historical_4_1_15": {
                   "has_save_prompt": bool(re.search(r"save_save|save_do_not_save", hist)) if hist else None,
                   "document_converter_checks": len(re.findall(r"INAPP_DOCUMENT_CONVERTER", hist)) if hist else None,
-                  "pub_extension_assignments": len(re.findall(r'_exportedName\\s*\\+=\\s*"\\.pub"', hist)) if hist else None,
+                  "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\.pub"', hist)) if hist else None,
                   "create_pub_mentions": len(re.findall(r"createPub", hist)) if hist else None,
               },
               "boundary": (
