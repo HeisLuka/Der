@@ -550,6 +550,7 @@ if [ ! -f "$OUT/output/new-save.pub" ]; then
   share_rc=$?
   set -e
   printf '%s\n' "$share_rc" > "$OUT/share-capture.rc"
+  printf 'share_copy_out_rc=%s\n' "$share_rc"
   capture share-capture-final
 fi
 
@@ -563,5 +564,16 @@ PY
   sha256sum "$OUT/output/new-save.pub" > "$OUT/output/new-save.sha256"
   echo new_pub_captured > "$OUT/status.txt"
 else
-  echo save_clicked_but_no_changed_pub_found > "$OUT/status.txt"
+  share_rc="$(cat "$OUT/share-capture.rc" 2>/dev/null || printf 'not_attempted')"
+  case "$share_rc" in
+    not_attempted)
+      echo save_clicked_but_no_changed_pub_found > "$OUT/status.txt"
+      ;;
+    0)
+      echo share_copy_out_returned_zero_but_output_missing > "$OUT/status.txt"
+      ;;
+    *)
+      printf 'share_copy_out_failed_rc_%s\n' "$share_rc" > "$OUT/status.txt"
+      ;;
+  esac
 fi
