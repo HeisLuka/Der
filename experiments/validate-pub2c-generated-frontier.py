@@ -19,6 +19,7 @@ doc=load("pub2c_root_document","generate-pub2c-root-document.py")
 fancy=load("pub2c_fancyborders","generate-pub2c-fancyborders.py")
 page263=load("pub2c_page263","generate-pub2c-page263.py")
 web=load("pub2c_page_web","generate-pub2c-page-web-companions.py")
+page266=load("pub2c_page266","generate-pub2c-page266.py")
 base=doc.load_base()
 
 def contents(blob):
@@ -58,8 +59,12 @@ def validate(apk):
             f_len=int.from_bytes(c[f_ref["off"]:f_ref["off"]+4],"little")
             w_generated=web.build_web_page_info(web.WebPageInfo())
             f_generated=web.build_form_properties(web.FormProperties())
-            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"+ba_generated+b"\x04\x00\x00\x00"+p_generated+w_generated+f_generated
-            expected=c[:f_ref["off"]+f_len]
+            p266_ref=next(r for r in refs if r["seq"]==266 and r["type"]==0x43 and r["parent"]==256)
+            p266_len=int.from_bytes(c[p266_ref["off"]:p266_ref["off"]+4],"little")
+            p266_raw=c[p266_ref["off"]:p266_ref["off"]+p266_len]
+            p266_generated=page266.build_page(page266.parse_page(p266_raw))
+            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"+ba_generated+b"\x04\x00\x00\x00"+p_generated+w_generated+f_generated+p266_generated
+            expected=c[:p266_ref["off"]+p266_len]
             if len(prefix)!=off or generated!=expected:
                 lim=min(len(generated),len(expected))
                 at=next((i for i in range(lim) if generated[i]!=expected[i]),lim)
