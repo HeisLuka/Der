@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "experiments/analyze-canyua-fancyborders.py"
+      - "experiments/analyze-canyua-fancyborders-records.py"
       - ".github/workflows/canyua-fancyborders.yml"
   workflow_dispatch:
 
@@ -42,10 +43,16 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check olefile
           python3 experiments/analyze-canyua-fancyborders.py work/base.apk --out work/fancy-borders
+          python3 experiments/analyze-canyua-fancyborders-records.py work/base.apk --out work/fancy-records
       - name: Print summary
-        run: cat work/fancy-borders/SUMMARY.md
+        run: |
+          cat work/fancy-borders/SUMMARY.md
+          echo
+          cat work/fancy-records/SUMMARY.md
       - uses: actions/upload-artifact@v4
         with:
           name: canyua-fancyborders-profile
-          path: work/fancy-borders/
+          path: |
+            work/fancy-borders/
+            work/fancy-records/
           retention-days: 30
