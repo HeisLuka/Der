@@ -280,13 +280,44 @@ def tap_row(r):
 def resumed(fragment):
     p=subprocess.run(["adb","shell","dumpsys","activity","activities"],
                      stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
-    return fragment in p.stdout
+    # A matching activity anywhere in the task/back stack is not enough.
+    # Accept only the activity Android reports as currently resumed.
+    for line in p.stdout.splitlines():
+        if ("mResumedActivity:" in line or "topResumedActivity=" in line) and fragment in line:
+            return True
+    return False
 
 # Leave the already-saved editor through the shipped Back control.
 rows=dump("share-editor")
 backs=[r for r in rows if r["rid"]==f"{pkg}:id/title_back_imageButton"]
 if len(backs)!=1 or not tap_row(backs[0]):
     raise SystemExit(51)
+
+# A new document can still present the app's normal "Save / Don't Save / Cancel"
+# close dialog even after the explicit Save menu action. We must not invoke a
+# second serializer here: choose the explicit DON'T SAVE action only as an exit
+# policy, then copy out whatever the first Save actually persisted.
+time.sleep(1)
+if not resumed(f"{pkg}/.MainActivity"):
+    rows=dump("share-back-result")
+    labels=[(r["text"] or r["desc"]).strip() for r in rows]
+    is_save_prompt=any(
+        "do you want to save changes" in label.lower()
+        for label in labels if label
+    )
+    if is_save_prompt:
+        dont=[
+            r for r in rows
+            if (r["text"] or r["desc"]).strip().lower().replace("’","'")=="don't save"
+            and r["clickable"]=="true"
+        ]
+        if len(dont)!=1 or not tap_row(dont[0]):
+            raise SystemExit(58)
+        (out/"share-exit-policy.json").write_text(json.dumps({
+            "reason":"close dialog remained after explicit Save",
+            "action":"DON'T SAVE",
+            "writer_invocations_added":0,
+        },indent=2,ensure_ascii=False)+"\n")
 
 for _ in range(20):
     if resumed(f"{pkg}/.MainActivity"):
