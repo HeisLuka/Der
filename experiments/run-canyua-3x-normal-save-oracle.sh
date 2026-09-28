@@ -463,18 +463,53 @@ for step in range(30):
             print("selected-and-returned", target_name)
             sys.exit(0)
 
-        # Some DocumentsUI builds focus the row on the first touch. ENTER is
-        # the accessibility/keyboard equivalent of activating the focused item.
-        subprocess.run(["adb","shell","input","keyevent","66"], check=False)
-        if wait_picker_return("picker-enter"):
-            print("selected-and-returned-via-enter", target_name)
-            sys.exit(0)
+        # Touching this AOSP DocumentsUI row can leave focus on the
+        # RecyclerView rather than dispatching the item click. Move keyboard
+        # focus into the list and activate the focused file with DPAD_CENTER.
+        for attempt in range(4):
+            subprocess.run(["adb","shell","input","keyevent","20"], check=False)  # DPAD_DOWN
+            time.sleep(0.35)
+            focus_root = dump(f"picker-focus-{attempt:02d}")
+            focus_rows = rows(focus_root)
+            (out/f"picker-focus-{attempt:02d}.json").write_text(
+                json.dumps(focus_rows,indent=2,ensure_ascii=False)+"\\n"
+            )
+            subprocess.run(["adb","shell","input","keyevent","23"], check=False)  # DPAD_CENTER
+            if wait_picker_return(f"picker-dpad-{attempt:02d}"):
+                print("selected-and-returned-via-dpad", target_name, attempt)
+                sys.exit(0)
 
-        # Last normal UI attempt: second tap on the same visible row.
-        tap_row(item)
-        if wait_picker_return("picker-second-tap"):
-            print("selected-and-returned-via-second-tap", target_name)
-            sys.exit(0)
+        # Some Google DocumentsUI builds expose an explicit preview affordance
+        # even when the list item itself is not accessibility-clickable.
+        # Use that normal UI path, then accept only an explicit Open/Select
+        # control and still require the picker Activity to return to Canyua.
+        current = dump("picker-before-preview")
+        preview = [
+            r for r in rows(current)
+            if r["resource_id"].endswith("/preview_icon")
+            and target_name.lower() in r["desc"].lower()
+            and r["clickable"] == "true"
+        ]
+        if preview and tap_row(preview[0]):
+            time.sleep(1.5)
+            preview_root = dump("picker-preview")
+            preview_rows = rows(preview_root)
+            (out/"picker-preview.json").write_text(
+                json.dumps(preview_rows,indent=2,ensure_ascii=False)+"\\n"
+            )
+            labels = {"open","select","choose","use this file","done"}
+            actions = [
+                r for r in preview_rows
+                if r["clickable"] == "true"
+                and (
+                    r["text"].strip().lower() in labels
+                    or r["desc"].strip().lower() in labels
+                )
+            ]
+            for idx, action in enumerate(actions[:4]):
+                if tap_row(action) and wait_picker_return(f"picker-preview-action-{idx:02d}"):
+                    print("selected-and-returned-via-preview", target_name)
+                    sys.exit(0)
 
         print("target visible but DocumentsUI did not return selection", file=sys.stderr)
         sys.exit(47)
