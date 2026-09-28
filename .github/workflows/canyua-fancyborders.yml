@@ -7,6 +7,7 @@ on:
       - "experiments/analyze-canyua-fancyborders-records.py"
       - "experiments/analyze-canyua-fancyborders-images.py"
       - "experiments/validate-canyua-fancyborders-wmf-laws.py"
+      - "experiments/generate-pub2c-fancyborders.py"
       - ".github/workflows/canyua-fancyborders.yml"
   workflow_dispatch:
 
@@ -48,6 +49,7 @@ jobs:
           python3 experiments/analyze-canyua-fancyborders-records.py work/base.apk --out work/fancy-records
           python3 experiments/analyze-canyua-fancyborders-images.py work/base.apk --out work/fancy-images
           python3 experiments/validate-canyua-fancyborders-wmf-laws.py work/base.apk
+          python3 experiments/generate-pub2c-fancyborders.py work/base.apk
       - name: Print summary
         run: |
           cat work/fancy-borders/SUMMARY.md
