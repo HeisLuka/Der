@@ -60,12 +60,33 @@ def summarize_block(mod,raw):
                     xi={"id":x["id"],"type":x["type"],"length":x["data_length"],"value":x["value"]}
                     xp=raw[x["payload_offset"]:x["end"]]
                     xi["payload_sha256"]=hashlib.sha256(xp).hexdigest()
+                    if x["type"]==0xC0:
+                        try:
+                            xi["utf16le"]=xp[:-2].decode("utf-16le") if xp.endswith(b"\\x00\\x00") else xp.decode("utf-16le")
+                        except Exception:
+                            pass
                     if x["type"] in (0x80,0x82,0x88,0x8A,0x90,0x98,0xA0,0xC0):
                         try:
                             xch=mod._children(raw,x)
                             xi["child_count"]=len(xch)
                             xi["child_schema"]="|".join("%02X:%02X:%d"%(y["id"],y["type"],y["data_length"]) for y in xch)
-                            xi["grandchildren"]=[{"id":y["id"],"type":y["type"],"length":y["data_length"],"value":y["value"],"payload_sha256":hashlib.sha256(raw[y["payload_offset"]:y["end"]]).hexdigest()} for y in xch]
+                            xi["grandchildren"]=[]
+                            for y in xch:
+                                yp=raw[y["payload_offset"]:y["end"]]
+                                yi={"id":y["id"],"type":y["type"],"length":y["data_length"],"value":y["value"],"payload_sha256":hashlib.sha256(yp).hexdigest()}
+                                if y["type"]==0xC0:
+                                    try:
+                                        yi["utf16le"]=yp[:-2].decode("utf-16le") if yp.endswith(b"\\x00\\x00") else yp.decode("utf-16le")
+                                    except Exception:
+                                        pass
+                                if y["type"] in (0x80,0x82,0x88,0x8A,0x90,0x98,0xA0):
+                                    try:
+                                        yy=mod._children(raw,y)
+                                        yi["child_count"]=len(yy)
+                                        yi["child_schema"]="|".join("%02X:%02X:%d"%(z["id"],z["type"],z["data_length"]) for z in yy)
+                                    except Exception as yexc:
+                                        yi["child_error"]=repr(yexc)
+                                xi["grandchildren"].append(yi)
                         except Exception as xexc:
                             xi["child_error"]=repr(xexc)
                     item["children"].append(xi)
@@ -133,6 +154,11 @@ def main():
             gs.extend([g for g in n["child"].get("grandchildren",[]) if g["id"]==gid])
         vals=[g["value"] for g in gs if g["value"] is not None]
         nested_field_stats.append({"id":gid,"count":len(gs),"types":Counter(g["type"] for g in gs).most_common(),"lengths":Counter(g["length"] for g in gs).most_common(),"unique_values":len(set(vals)) if vals else None,"top_values":Counter(vals).most_common(20) if vals else [],"payload_hashes":len({g["payload_sha256"] for g in gs})})
+    nested_detail=[]
+    for n in nested:
+        child=n["child"] or {}
+        gs=child.get("grandchildren",[])
+        nested_detail.append({"template":n["template"],"fields":[{"id":g["id"],"type":g["type"],"length":g["length"],"value":g.get("value"),"utf16le":g.get("utf16le"),"child_count":g.get("child_count"),"child_schema":g.get("child_schema"),"payload_sha256":g["payload_sha256"]} for g in gs]})
     report={
       "templates":len(rows),"errors":errors,
       "empty_count":sum(1 for r in rows if r["length"]==4),
@@ -147,6 +173,7 @@ def main():
       "nested_schema_count":len(nested_schema),
       "nested_schemas":nested_schema.most_common(),
       "nested_field_stats":nested_field_stats,
+      "nested_detail":nested_detail,
     }
     a.out.mkdir(parents=True,exist_ok=True)
     (a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
@@ -169,6 +196,11 @@ def main():
     for s in report["nested_field_stats"]:
         lines.append("- nested field 0x%02X: count=%d types=%s lengths=%s unique_values=%s payload_hashes=%d"%(s["id"],s["count"],s["types"],s["lengths"],s["unique_values"],s["payload_hashes"]))
         if s["top_values"]: lines.append("  - top values: %s"%s["top_values"])
+    lines += ["","## Nested detail",""]
+    for d in report["nested_detail"]:
+        lines.append("- %s"%d["template"])
+        for g in d["fields"]:
+            lines.append("  - 0x%02X/%02X len=%s value=%s text=%s child_count=%s child_schema=%s sha=%s..."%(g["id"],g["type"],g["length"],g["value"],repr(g["utf16le"]),g["child_count"],g["child_schema"],g["payload_sha256"][:16]))
     lines += ["","## Fields",""]
     for s in field_stats:
         lines.append("- field 0x%02X: present %d/%d types=%s lengths=%s unique_values=%s payload_hashes=%d child_schemas=%s"%(
