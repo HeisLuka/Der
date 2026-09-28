@@ -174,7 +174,29 @@ def main():
       "nested_schemas":nested_schema.most_common(),
       "nested_field_stats":nested_field_stats,
       "nested_detail":nested_detail,
+      "record_detail":[],
     }
+    record_detail=[]
+    for n in nested:
+        child=n["child"] or {}
+        g0a=next((g for g in child.get("grandchildren",[]) if g["id"]==0x0A),None)
+        if not g0a:
+            continue
+        # Re-open the matching raw nested object from the detailed tree already parsed above.
+        # The A0 grandchildren are the eight border records.
+        recs=[]
+        for r in nonempty:
+            if r["template"]!=n["template"]:
+                continue
+            f02=next(f for f in r["fields"] if f["id"]==0x02)
+            outer_child=(f02.get("children") or [None])[0]
+            g0a_full=next((g for g in outer_child.get("grandchildren",[]) if g["id"]==0x0A),None)
+            # Need exact raw positions, so parse again from the stored hierarchy is insufficient;
+            # derive summary from child schema lengths/hashes on next pass.
+            if g0a_full:
+                recs.append({"child_count":g0a_full.get("child_count"),"child_schema":g0a_full.get("child_schema"),"payload_sha256":g0a_full.get("payload_sha256")})
+        record_detail.append({"template":n["template"],"records":recs})
+    report["record_detail"]=record_detail
     a.out.mkdir(parents=True,exist_ok=True)
     (a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
     lines=[
