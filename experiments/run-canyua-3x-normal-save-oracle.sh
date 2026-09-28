@@ -311,96 +311,211 @@ from pathlib import Path
 out = Path("work/dynamic")
 target_name = "CanyuaOracleSample.pub"
 
+def sh(*args):
+    return subprocess.run(
+        ["adb", "shell", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+def activity_state():
+    p = sh("dumpsys", "activity", "activities")
+    txt = p.stdout
+    picker = bool(re.search(
+        r"mResumedActivity:.*com\.google\.android\.documentsui/.+PickActivity",
+        txt,
+        re.I,
+    ))
+    canyua = bool(re.search(
+        r"mResumedActivity:.*com\.canyua\.publisherexpert",
+        txt,
+        re.I,
+    ))
+    return picker, canyua, txt
+
 def dump(tag):
     remote = "/sdcard/window.xml"
     local = out / f"{tag}.xml"
-    subprocess.run(["adb","shell","uiautomator","dump",remote],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["adb","pull",remote,str(local)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["adb","shell","uiautomator","dump",remote],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["adb","pull",remote,str(local)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     try:
         return ET.parse(local).getroot()
     except Exception:
         return None
 
-def rows(root):
-    if root is None:
-        return []
-    result=[]
-    for n in root.iter("node"):
-        result.append({
-            "text":(n.attrib.get("text") or "").strip(),
-            "desc":(n.attrib.get("content-desc") or "").strip(),
-            "resource_id":(n.attrib.get("resource-id") or "").strip(),
-            "bounds":n.attrib.get("bounds",""),
-            "clickable":n.attrib.get("clickable",""),
-            "class":n.attrib.get("class",""),
-        })
-    return result
+def row(n):
+    return {
+        "text": (n.attrib.get("text") or "").strip(),
+        "desc": (n.attrib.get("content-desc") or "").strip(),
+        "resource_id": (n.attrib.get("resource-id") or "").strip(),
+        "bounds": n.attrib.get("bounds",""),
+        "clickable": n.attrib.get("clickable",""),
+        "focusable": n.attrib.get("focusable",""),
+        "class": n.attrib.get("class",""),
+    }
 
-def tap(row):
-    m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',row["bounds"])
+def rows(root):
+    return [] if root is None else [row(n) for n in root.iter("node")]
+
+def center(bounds):
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds or "")
     if not m:
+        return None
+    x1,y1,x2,y2 = map(int,m.groups())
+    return ((x1+x2)//2, (y1+y2)//2)
+
+def tap_bounds(bounds):
+    p = center(bounds)
+    if p is None:
         return False
-    x1,y1,x2,y2=map(int,m.groups())
-    subprocess.run(["adb","shell","input","tap",str((x1+x2)//2),str((y1+y2)//2)],check=True)
-    time.sleep(1.5)
+    subprocess.run(
+        ["adb","shell","input","tap",str(p[0]),str(p[1])],
+        check=True,
+    )
+    time.sleep(1.25)
     return True
 
-rs=rows(dump("picker-main"))
-(out/"picker-main.json").write_text(json.dumps(rs,indent=2,ensure_ascii=False)+"\n")
-cloud=[r for r in rs if r["resource_id"]=="com.canyua.publisherexpert:id/menu_cloud"]
-if len(cloud)!=1 or not tap(cloud[0]):
-    print(f"menu_cloud control not uniquely available: {len(cloud)}",file=sys.stderr)
+def tap_row(r):
+    return tap_bounds(r["bounds"])
+
+def target_item(root):
+    if root is None:
+        return None
+    parent = {child: par for par in root.iter() for child in par}
+    for n in root.iter("node"):
+        text = (n.attrib.get("text") or "").strip()
+        desc = (n.attrib.get("content-desc") or "").strip()
+        if text != target_name and desc != target_name:
+            continue
+        cur = n
+        best = n
+        for _ in range(8):
+            if cur is None:
+                break
+            rid = (cur.attrib.get("resource-id") or "").strip()
+            if rid.endswith("/item_root"):
+                best = cur
+                break
+            if cur.attrib.get("focusable") == "true":
+                best = cur
+            cur = parent.get(cur)
+        return row(best)
+    return None
+
+def wait_picker_return(tag):
+    trace = []
+    for i in range(16):
+        picker, canyua, txt = activity_state()
+        trace.append({"poll": i, "picker": picker, "canyua": canyua})
+        if not picker and canyua:
+            (out / f"{tag}-return.json").write_text(
+                json.dumps(trace, indent=2) + "\n"
+            )
+            return True
+        time.sleep(0.5)
+    (out / f"{tag}-return.json").write_text(
+        json.dumps(trace, indent=2) + "\n"
+    )
+    return False
+
+main = dump("picker-main")
+main_rows = rows(main)
+(out/"picker-main.json").write_text(
+    json.dumps(main_rows,indent=2,ensure_ascii=False)+"\n"
+)
+cloud = [
+    r for r in main_rows
+    if r["resource_id"] == "com.canyua.publisherexpert:id/menu_cloud"
+]
+if len(cloud) != 1 or not tap_row(cloud[0]):
+    print(f"menu_cloud control not uniquely available: {len(cloud)}", file=sys.stderr)
     sys.exit(45)
 
-opened_roots=False
-clicked_downloads=False
+opened_roots = False
+clicked_downloads = False
 for step in range(30):
-    rs=rows(dump(f"picker-step-{step:02d}"))
+    root = dump(f"picker-step-{step:02d}")
+    rs = rows(root)
     if step < 8:
         (out/f"picker-step-{step:02d}.json").write_text(
             json.dumps(rs,indent=2,ensure_ascii=False)+"\n"
         )
-    target=[r for r in rs if r["text"]==target_name or r["desc"]==target_name]
-    if target and tap(target[0]):
-        print("selected",target_name)
-        sys.exit(0)
+
+    item = target_item(root)
+    if item is not None:
+        (out/"picker-target.json").write_text(
+            json.dumps(item,indent=2,ensure_ascii=False)+"\n"
+        )
+        # DocumentsUI file-title TextView is not clickable. Tap the enclosing
+        # item_root/focusable row, then require PickActivity to actually return
+        # its result to Canyua before claiming success.
+        tap_row(item)
+        if wait_picker_return("picker-tap"):
+            print("selected-and-returned", target_name)
+            sys.exit(0)
+
+        # Some DocumentsUI builds focus the row on the first touch. ENTER is
+        # the accessibility/keyboard equivalent of activating the focused item.
+        subprocess.run(["adb","shell","input","keyevent","66"], check=False)
+        if wait_picker_return("picker-enter"):
+            print("selected-and-returned-via-enter", target_name)
+            sys.exit(0)
+
+        # Last normal UI attempt: second tap on the same visible row.
+        tap_row(item)
+        if wait_picker_return("picker-second-tap"):
+            print("selected-and-returned-via-second-tap", target_name)
+            sys.exit(0)
+
+        print("target visible but DocumentsUI did not return selection", file=sys.stderr)
+        sys.exit(47)
 
     if not opened_roots:
-        roots=[
+        roots = [
             r for r in rs
-            if r["desc"].lower() in {"show roots","open navigation drawer","show navigation drawer"}
+            if r["desc"].lower() in {
+                "show roots", "open navigation drawer", "show navigation drawer"
+            }
             or r["resource_id"].endswith("/toolbar_navigation_button")
         ]
-        if roots and tap(roots[0]):
-            opened_roots=True
+        if roots and tap_row(roots[0]):
+            opened_roots = True
             continue
 
-    downloads=[
+    downloads = [
         r for r in rs
-        if (r["text"].lower() in {"downloads","download"} or
-            r["desc"].lower() in {"downloads","download"})
-        and r["clickable"]=="true"
+        if (r["text"].lower() in {"downloads","download"}
+            or r["desc"].lower() in {"downloads","download"})
+        and r["clickable"] == "true"
     ]
     if downloads and (not clicked_downloads or step > 8):
-        if tap(downloads[0]):
-            clicked_downloads=True
+        if tap_row(downloads[0]):
+            clicked_downloads = True
             continue
 
     if not opened_roots:
-        fallback=[
+        fallback = [
             r for r in rs
-            if r["clickable"]=="true"
+            if r["clickable"] == "true"
             and r["class"].endswith("ImageButton")
             and "documentsui" in r["resource_id"].lower()
         ]
-        if fallback and tap(fallback[0]):
-            opened_roots=True
+        if fallback and tap_row(fallback[0]):
+            opened_roots = True
             continue
+
     time.sleep(0.75)
 
-print("system picker never exposed the pinned PUB",file=sys.stderr)
+print("system picker never exposed the pinned PUB", file=sys.stderr)
 sys.exit(46)
 PY
 }
