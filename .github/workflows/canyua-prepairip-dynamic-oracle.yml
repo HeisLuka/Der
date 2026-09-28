@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/canyua-prepairip-dynamic-oracle.yml"
-      - "experiments/run-canyua-prepairip-dynamic-discovery.sh"
+      - "experiments/run-canyua-prepairip-dynamic-discovery.sh"\n      - "experiments/analyze-canyua-oracle-bundle.py"\n      - "experiments/diff-pub-cfb.py"
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Acquire public pre-PairIP candidate
+      - name: Self-test oracle analyzers\n        run: |\n          python3 experiments/diff-pub-cfb.py --self-test\n          python3 experiments/analyze-canyua-oracle-bundle.py --self-test\n\n      - name: Acquire public pre-PairIP candidate
         shell: bash
         run: |
           set -euo pipefail
