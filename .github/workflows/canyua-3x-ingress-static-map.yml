@@ -74,6 +74,12 @@ jobs:
             echo
             grep -n -C 18 -E               'onCreate\(|onNewIntent\(|getIntent\(|setIntent\(|getAction\(|getData\(|getDataString\(|getType\(|ACTION_VIEW|ACTION_SEND|EXTRA_STREAM|ClipData|Uri|content://|file://|openDocument|openFile|import|Import|copy|Copy|EditActivity|startActivity'               "$MAIN" || true
             echo
+            echo '# MainActivity exact content-URI handler'
+            sed -n '942,1050p' "$MAIN" || true
+            echo
+            echo '# MainActivity exact activity-result ingress'
+            sed -n '2038,2056p' "$MAIN" || true
+            echo
             echo '# EditActivity inbound-path map'
             if [ -f "$EDIT" ]; then
               grep -n -C 16 -E                 'onCreate\(|getIntent\(|getStringExtra\(|getParcelableExtra\(|Uri|path|file|pub|document|source|open|load|parse'                 "$EDIT" || true
