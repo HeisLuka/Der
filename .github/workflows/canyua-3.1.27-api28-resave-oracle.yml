@@ -1,0 +1,134 @@
+name: Canyua 3.1.27 Android 9 imported-PUB resave discriminator
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-3.1.27-api28-resave-oracle.yml"
+      - "experiments/run-canyua-3.1.27-resave-control.sh"
+      - "experiments/inspect-canyua-package.py"
+      - "experiments/diff-pub-cfb.py"
+      - "experiments/analyze-canyua-oracle-bundle.py"
+      - "experiments/probe-canyua-contents-profile.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Acquire pinned public Canyua 3.1.27
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/acquire work/runtime
+          docker run --rm \
+            -v "$PWD/work/acquire:/output" \
+            ghcr.io/efforg/apkeep:stable \
+            -a "com.canyua.publisherexpert@3.1.27" \
+            -d apk-pure /output
+          APK="$(find work/acquire -maxdepth 1 -type f -name '*.apk' | head -n1)"
+          test -n "$APK"
+          cp "$APK" work/runtime/canyua-3.1.27.apk
+          actual="$(sha256sum work/runtime/canyua-3.1.27.apk | awk '{print $1}')"
+          test "$actual" = "23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682"
+          python3 experiments/inspect-canyua-package.py \
+            work/runtime/canyua-3.1.27.apk \
+            --json work/runtime/package-inspection.json \
+            --require-eligible
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-api28-runtime
+          path: work/runtime/
+          if-no-files-found: error
+          retention-days: 7
+
+  resave-api28:
+    needs: acquire
+    runs-on: macos-14
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: canyua-3.1.27-api28-runtime
+          path: work/runtime
+      - name: Prepare pinned control and analysis dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp work/runtime/canyua-3.1.27.apk work/canyua-3.1.27.apk
+          python3 -m venv "$RUNNER_TEMP/canyua-api28-venv"
+          "$RUNNER_TEMP/canyua-api28-venv/bin/python" -m pip install --disable-pip-version-check olefile
+          echo "$RUNNER_TEMP/canyua-api28-venv/bin" >> "$GITHUB_PATH"
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/apache/poi/74700b5692fd0449031ac6a3c78aec1155d144d5/test-data/publisher/Sample.pub \
+            -o work/Sample.pub
+          actual="$(shasum -a 256 work/Sample.pub | awk '{print $1}')"
+          test "$actual" = "6fefdef46b87c767150878dc384549cb2d2ec2ac54de25f8ddb3a5628301107e"
+      - name: Run imported-PUB no-op Save on Android 9
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 28
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_3
+          cores: 4
+          ram-size: 4096M
+          heap-size: 1024M
+          disk-size: 8G
+          disable-animations: true
+          emulator-boot-timeout: 1200
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -no-metrics
+            -accel off
+            -gpu swiftshader_indirect
+          script: bash experiments/run-canyua-3.1.27-resave-control.sh
+      - name: Summarize imported-PUB result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/canyua-3127/analysis
+          status="$(cat work/canyua-3127/status.txt 2>/dev/null || printf 'runtime_step_failed_before_status')"
+          printf 'behavioral_status=%s\n' "$status" | tee work/canyua-3127/analysis/api28-status.txt
+          if [ -f work/canyua-3127/oracle-bundle/resave-control.pub ]; then
+            python3 experiments/diff-pub-cfb.py \
+              work/canyua-3127/oracle-bundle/source.pub \
+              work/canyua-3127/oracle-bundle/resave-control.pub \
+              --json work/canyua-3127/analysis/source-to-resave.diff.json
+            python3 experiments/probe-canyua-contents-profile.py \
+              --pub work/canyua-3127/oracle-bundle/resave-control.pub \
+              --json work/canyua-3127/analysis/resave.contents-profile.json || true
+            python3 experiments/analyze-canyua-oracle-bundle.py \
+              --bundle work/canyua-3127/oracle-bundle \
+              --json work/canyua-3127/analysis/oracle-bundle.json \
+              --markdown work/canyua-3127/analysis/oracle-bundle.md
+          fi
+      - name: Upload Android 9 imported-PUB evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-api28-resave-evidence
+          path: work/canyua-3127/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Upload Android 9 captured PUB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-api28-resave-pub
+          path: work/canyua-3127/oracle-bundle/resave-control.pub
+          if-no-files-found: ignore
+          retention-days: 7
