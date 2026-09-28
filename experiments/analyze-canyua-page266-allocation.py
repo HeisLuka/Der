@@ -53,16 +53,17 @@ def main():
             "web_in_objects":pf["web"] in pf["objects"],"form_in_objects":pf["form"] in pf["objects"],"controlling_in_objects":pf["controlling"] in pf["objects"],
             "next_seq":nxt["seq"],"next_type":nxt["type"],"next_parent":nxt["parent"],
             "web_physical_rank_delta":rank[pf["web"]]-i,"form_physical_rank_delta":rank[pf["form"]]-i,
-            "seq267_type":byseq[267]["type"],"seq267_parent":byseq[267]["parent"],"seq267_phys_delta":rank[267]-i,
-            "seq268_type":byseq[268]["type"],"seq268_parent":byseq[268]["parent"],"seq268_phys_delta":rank[268]-i,
+            "seq267_type":byseq.get(267,{}).get("type"),"seq267_parent":byseq.get(267,{}).get("parent"),"seq267_phys_delta":rank.get(267,None)-i if 267 in rank else None,
+            "seq268_type":byseq.get(268,{}).get("type"),"seq268_parent":byseq.get(268,{}).get("parent"),"seq268_phys_delta":rank.get(268,None)-i if 268 in rank else None,
           })
         except Exception as exc:errors.append({"template":name,"error":repr(exc)})
     keys=["web_form_delta","web_form_abs_delta","web_type","form_type","web_parent","form_parent","web_in_objects","form_in_objects","controlling_in_objects","next_seq","next_type","next_parent","web_physical_rank_delta","form_physical_rank_delta","seq267_type","seq267_parent","seq267_phys_delta","seq268_type","seq268_parent","seq268_phys_delta"]
     hist={k:Counter(r[k] for r in rows).most_common() for k in keys}
     branches=Counter((r["next_seq"],r["next_type"],r["next_parent"],r["web_physical_rank_delta"],r["form_physical_rank_delta"],r["web_form_delta"]) for r in rows)
-    report={"templates":len(rows),"errors":errors,"hist":hist,"branches":[{"next_seq":k[0],"next_type":k[1],"next_parent":k[2],"web_rank_delta":k[3],"form_rank_delta":k[4],"form_minus_web":k[5],"count":v} for k,v in branches.most_common()],"rows":rows}
+    error_hist=Counter(e["error"] for e in errors).most_common()
+    report={"templates":len(rows),"source_templates":len(rows)+len(errors),"errors":errors,"error_hist":error_hist,"hist":hist,"branches":[{"next_seq":k[0],"next_type":k[1],"next_parent":k[2],"web_rank_delta":k[3],"form_rank_delta":k[4],"form_minus_web":k[5],"count":v} for k,v in branches.most_common()],"rows":rows}
     a.out.mkdir(parents=True,exist_ok=True);(a.out/"report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
-    lines=["# PAGE266 allocation/order profile","", "- templates: **%d**"%len(rows),"","## Histograms",""]
+    lines=["# PAGE266 allocation/order profile","", "- analyzed: **%d / %d**"%(len(rows),len(rows)+len(errors)),"- errors: **%s**"%error_hist,"","## Histograms",""]
     for k in keys:lines.append("- %s: **%s**"%(k,hist[k][:20]))
     lines+=["","## Branches",""]
     for b in report["branches"][:30]:lines.append("- %s"%b)
