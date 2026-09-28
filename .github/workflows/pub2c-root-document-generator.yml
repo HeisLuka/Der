@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - "experiments/generate-pub2c-root-document.py"
+      - "experiments/test_pub2c_root_document_generator.py"
+      - "experiments/validate-pub2c-generated-frontier.py"
+      - "experiments/generate-pub2c-prechunk.py"
       - ".github/workflows/pub2c-root-document-generator.yml"
   workflow_dispatch:
 
