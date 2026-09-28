@@ -316,6 +316,79 @@ sys.exit(46)
 PY
 }
 
+snapshot_pubs() {
+  local output="$1"
+  python3 - "$output" <<'PY'
+from __future__ import annotations
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+proc = subprocess.run(
+    ["adb","shell","find","/sdcard","-type","f","-iname","*.pub"],
+    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+)
+rows=[]
+seen=set()
+for line in proc.stdout.splitlines():
+    path=line.strip()
+    if not path or path in seen:
+        continue
+    seen.add(path)
+    pulled=subprocess.run(
+        ["adb","exec-out","cat",path],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    if pulled.returncode != 0:
+        rows.append({"path":path,"sha256":None,"bytes":None,"readable":False})
+        continue
+    data=pulled.stdout
+    rows.append({
+        "path":path,
+        "sha256":hashlib.sha256(data).hexdigest(),
+        "bytes":len(data),
+        "readable":True,
+    })
+out.write_text(json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+PY
+}
+
+capture_changed_pub() {
+  python3 - <<'PY'
+from __future__ import annotations
+import json
+import subprocess
+from pathlib import Path
+
+out=Path("work/canyua-3127")
+bundle=out/"oracle-bundle"
+before={r["path"]:r for r in json.loads((out/"pubs-before.json").read_text())}
+after=json.loads((out/"pubs-after.json").read_text())
+changes=[]
+for row in after:
+    old=before.get(row["path"])
+    if old is None:
+        changes.append({"kind":"added","before":None,"after":row})
+    elif old.get("sha256") != row.get("sha256"):
+        changes.append({"kind":"changed","before":old,"after":row})
+(out/"pub-changes.json").write_text(json.dumps(changes,indent=2,ensure_ascii=False)+"\n")
+if not changes:
+    raise SystemExit(0)
+
+# Prefer a changed/added PUB other than the immutable ingress fixture.
+candidates=[c for c in changes if c["after"]["path"] != "/sdcard/Download/CanyuaOracleSample.pub"]
+pick=candidates[0] if candidates else changes[0]
+remote=pick["after"]["path"]
+subprocess.run(["adb","pull",remote,str(bundle/"resave-control.pub")],check=True)
+(out/"selected-output.json").write_text(
+    json.dumps({"remote":remote,"change":pick},indent=2,ensure_ascii=False)+"\n"
+)
+PY
+}
+
 echo "=== device/native bridge ==="
 {
   adb shell getprop ro.product.model || true
@@ -335,6 +408,11 @@ do
 done
 
 adb push "$WORK/Sample.pub" "$REMOTE" >/dev/null
+adb shell am broadcast \
+  -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+  -d file:///sdcard/Download/CanyuaOracleSample.pub \
+  >/dev/null 2>&1 || true
+sleep 2
 adb pull "$REMOTE" "$OUT/pre-save-source.pub" >/dev/null
 sha256sum "$OUT/pre-save-source.pub" | tee "$OUT/pre-save-source.sha256"
 adb shell ls -l "$REMOTE" > "$OUT/pre-save-stat.txt" 2>&1 || true
@@ -439,6 +517,8 @@ if ! grep -Eqi 'EditActivity|PageFragment'     "$OUT/open-activity.txt" "$OUT/op
   fi
 fi
 
+snapshot_pubs "$OUT/pubs-before.json"
+
 echo "=== one ordinary no-op Save ==="
 adb logcat -c || true
 set +e
@@ -465,8 +545,10 @@ fi
 
 adb shell ls -l "$REMOTE" > "$OUT/post-save-stat.txt" 2>&1 || true
 adb shell 'find /sdcard -type f -iname "*.pub" -print 2>/dev/null | sort'   > "$OUT/post-save-pub-files.txt" || true
+snapshot_pubs "$OUT/pubs-after.json"
+capture_changed_pub || true
 
-if adb pull "$REMOTE" "$BUNDLE/resave-control.pub" >/dev/null 2>&1; then
+if [ -f "$BUNDLE/resave-control.pub" ]; then
   sha256sum "$BUNDLE/resave-control.pub" | tee "$OUT/resave-control.sha256"
   python3 - <<'PY'
 from pathlib import Path
@@ -478,12 +560,12 @@ PY
   before="$(sha256sum "$BUNDLE/source.pub" | awk '{print $1}')"
   after="$(sha256sum "$BUNDLE/resave-control.pub" | awk '{print $1}')"
   if [ "$before" = "$after" ]; then
-    printf 'save_completed_output_byte_identical_or_not_rewritten\n' | tee "$OUT/status.txt"
+    printf 'save_completed_output_byte_identical\n' | tee "$OUT/status.txt"
   else
     printf 'resave_control_captured\n' | tee "$OUT/status.txt"
   fi
 else
-  printf 'save_clicked_but_output_not_retrievable\n' | tee "$OUT/status.txt"
+  printf 'save_clicked_but_no_changed_pub_found\n' | tee "$OUT/status.txt"
 fi
 
 adb shell settings put global airplane_mode_on 0 || true
