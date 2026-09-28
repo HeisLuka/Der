@@ -106,10 +106,24 @@ jobs:
               return m.group(1).lower() if m else None
 
           def normalized(path, label):
-              dst=Path("work/out")/(label+"-nobuildid.so")
-              tool="objcopy"
-              subprocess.check_call([tool,"--remove-section=.note.gnu.build-id",str(path),str(dst)])
-              return hashlib.sha256(dst.read_bytes()).hexdigest()
+              blob=bytearray(path.read_bytes())
+              bid_hex=build_id(path)
+              if not bid_hex:
+                  raise SystemExit(f"{label}: GNU Build ID not found")
+              bid=bytes.fromhex(bid_hex)
+              positions=[]
+              start=0
+              while True:
+                  pos=bytes(blob).find(bid,start)
+                  if pos < 0:
+                      break
+                  positions.append(pos)
+                  start=pos+1
+              if len(positions) != 1:
+                  raise SystemExit(f"{label}: expected one Build ID payload occurrence, got {positions}")
+              pos=positions[0]
+              blob[pos:pos+len(bid)]=b"\\x00"*len(bid)
+              return hashlib.sha256(bytes(blob)).hexdigest()
 
           sym={v:symbols(Path("work/out")/f"{v}-libpubBuilder.so") for v in vers}
           for v in vers:
