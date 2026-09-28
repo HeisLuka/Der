@@ -1,0 +1,134 @@
+name: Map Canyua 3.1.27 PUB ingress statically
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-3x-ingress-static-map.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install JADX and Android manifest tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y aapt jq unzip
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest             | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url'             | head -n1)"
+          test -n "$JADX_URL"
+          curl -fL "$JADX_URL" -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d "$RUNNER_TEMP/jadx"
+          echo "$RUNNER_TEMP/jadx/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire pinned Canyua 3.1.27
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/acquire work/report
+          docker run --rm             -v "$PWD/work/acquire:/output"             ghcr.io/efforg/apkeep:stable             -a "com.canyua.publisherexpert@3.1.27"             -d apk-pure /output             > work/report/download.stdout             2> work/report/download.stderr
+
+          APK="$(find work/acquire -maxdepth 1 -type f -name '*.apk' | head -n1)"
+          test -n "$APK"
+          cp "$APK" work/canyua-3.1.27.apk
+
+          actual="$(sha256sum work/canyua-3.1.27.apk | awk '{print $1}')"
+          expected='23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682'
+          test "$actual" = "$expected"
+          printf '%s\n' "$actual" > work/report/package.sha256
+
+      - name: Dump manifest ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          aapt dump xmltree work/canyua-3.1.27.apk AndroidManifest.xml             > work/report/manifest.xmltree.txt
+          aapt dump badging work/canyua-3.1.27.apk             > work/report/badging.txt
+
+          {
+            echo '# Manifest ingress focus'
+            grep -n -C 20 -E               'MainActivity|EditActivity|android.intent.action.(VIEW|SEND|SEND_MULTIPLE|OPEN_DOCUMENT)|android.intent.category.DEFAULT|android.intent.category.BROWSABLE|mimeType|scheme|pathPattern|pathSuffix'               work/report/manifest.xmltree.txt || true
+          } > work/report/manifest-ingress.txt
+
+      - name: Decompile Java shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          jadx --show-bad-code --no-debug-info -d work/jadx work/canyua-3.1.27.apk             > work/report/jadx.log 2>&1 || true
+          MAIN=work/jadx/sources/com/canyua/publisherexpert/MainActivity.java
+          EDIT=work/jadx/sources/com/canyua/publisherexpert/EditActivity.java
+          test -f "$MAIN"
+
+          {
+            echo '# MainActivity ingress control-flow map'
+            echo
+            grep -n -C 18 -E               'onCreate\(|onNewIntent\(|getIntent\(|setIntent\(|getAction\(|getData\(|getDataString\(|getType\(|ACTION_VIEW|ACTION_SEND|EXTRA_STREAM|ClipData|Uri|content://|file://|openDocument|openFile|import|Import|copy|Copy|EditActivity|startActivity'               "$MAIN" || true
+            echo
+            echo '# EditActivity inbound-path map'
+            if [ -f "$EDIT" ]; then
+              grep -n -C 16 -E                 'onCreate\(|getIntent\(|getStringExtra\(|getParcelableExtra\(|Uri|path|file|pub|document|source|open|load|parse'                 "$EDIT" || true
+            fi
+          } > work/report/ingress-map.txt
+
+      - name: Build machine-readable ingress receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+
+          mainp=Path("work/jadx/sources/com/canyua/publisherexpert/MainActivity.java")
+          editp=Path("work/jadx/sources/com/canyua/publisherexpert/EditActivity.java")
+          manifest=Path("work/report/manifest.xmltree.txt").read_text(errors="replace")
+          main=mainp.read_text(errors="replace")
+          edit=editp.read_text(errors="replace") if editp.exists() else ""
+
+          pats = {
+              "main_on_new_intent": r"\bonNewIntent\s*\(",
+              "main_get_data": r"\.getData\s*\(",
+              "main_get_data_string": r"\.getDataString\s*\(",
+              "main_action_view": r"ACTION_VIEW|android\.intent\.action\.VIEW",
+              "main_action_send": r"ACTION_SEND|android\.intent\.action\.SEND",
+              "main_extra_stream": r"EXTRA_STREAM|android\.intent\.extra\.STREAM",
+              "main_start_edit_activity": r"EditActivity",
+              "main_file_scheme_literal": r"file://|\"file\"",
+              "main_content_scheme_literal": r"content://|\"content\"",
+              "edit_get_intent": r"\.getIntent\s*\(",
+              "edit_uri_mentions": r"\bUri\b",
+          }
+          counts={}
+          for key,pat in pats.items():
+              hay = edit if key.startswith("edit_") else main
+              counts[key]=len(re.findall(pat,hay,re.I))
+
+          report={
+              "schema":"der/canyua-3.1.27-ingress-static-map/v1",
+              "package_sha256":"23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682",
+              "manifest_view_filters":len(re.findall(r"android\.intent\.action\.VIEW",manifest)),
+              "manifest_send_filters":len(re.findall(r"android\.intent\.action\.SEND",manifest)),
+              "counts":counts,
+              "boundary":"Static intent/import mapping only. No purchase, license, signature, PairIP or protection state is modified.",
+          }
+          Path("work/report/report.json").write_text(json.dumps(report,indent=2)+"\n")
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload ingress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-ingress-static-map
+          path: work/report/
+          if-no-files-found: warn
+          retention-days: 30
