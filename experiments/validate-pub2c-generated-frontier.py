@@ -17,6 +17,8 @@ def load(name,file):
 pre=load("pub2c_prechunk","generate-pub2c-prechunk.py")
 doc=load("pub2c_root_document","generate-pub2c-root-document.py")
 fancy=load("pub2c_fancyborders","generate-pub2c-fancyborders.py")
+page263=load("pub2c_page263","generate-pub2c-page263.py")
+web=load("pub2c_page_web","generate-pub2c-page-web-companions.py")
 base=doc.load_base()
 
 def contents(blob):
@@ -46,8 +48,18 @@ def validate(apk):
             mm_len=int.from_bytes(c[mm_ref["off"]:mm_ref["off"]+4],"little")
             if mm_len != 4:
                 raise AssertionError(f"{name}: MailMergeData not empty: {mm_len}")
-            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"+ba_generated+b"\x04\x00\x00\x00"
-            expected=c[:mm_ref["off"]+mm_len]
+            p_ref=next(r for r in refs if r["seq"]==263 and r["type"]==0x43 and r["parent"]==256)
+            p_len=int.from_bytes(c[p_ref["off"]:p_ref["off"]+4],"little")
+            p_raw=c[p_ref["off"]:p_ref["off"]+p_len]
+            p_generated=page263.build_page(page263.parse_page(p_raw))
+            w_ref=next(r for r in refs if r["seq"]==264 and r["type"]==0x60 and r["parent"]==263)
+            w_len=int.from_bytes(c[w_ref["off"]:w_ref["off"]+4],"little")
+            f_ref=next(r for r in refs if r["seq"]==265 and r["type"]==0x77 and r["parent"]==263)
+            f_len=int.from_bytes(c[f_ref["off"]:f_ref["off"]+4],"little")
+            w_generated=web.build_web_page_info(web.WebPageInfo())
+            f_generated=web.build_form_properties(web.FormProperties())
+            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"+ba_generated+b"\x04\x00\x00\x00"+p_generated+w_generated+f_generated
+            expected=c[:f_ref["off"]+f_len]
             if len(prefix)!=off or generated!=expected:
                 lim=min(len(generated),len(expected))
                 at=next((i for i in range(lim) if generated[i]!=expected[i]),lim)
