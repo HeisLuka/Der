@@ -1,0 +1,177 @@
+name: Map Canyua 3.x writer and save gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-3x-writer-save-gate.yml"
+      - "experiments/inspect-canyua-package.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest             | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url'             | head -n1)"
+          test -n "$JADX_URL"
+          curl -fL "$JADX_URL" -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d "$RUNNER_TEMP/jadx"
+          echo "$RUNNER_TEMP/jadx/bin" >> "$GITHUB_PATH"
+
+      - name: Download and inspect Canyua 3.x builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/packages work/report work/jadx
+
+          for ver in 3.1.35 3.1.27; do
+            outdir="$PWD/work/packages/$ver"
+            mkdir -p "$outdir"
+            docker run --rm               -v "$outdir:/output"               ghcr.io/efforg/apkeep:stable               -a "com.canyua.publisherexpert@$ver"               -d apk-pure /output               > "work/report/$ver.download.stdout"               2> "work/report/$ver.download.stderr"
+
+            candidate="$(find "$outdir" -maxdepth 1 -type f | head -n1)"
+            test -n "$candidate"
+            python3 experiments/inspect-canyua-package.py               "$candidate"               --json "work/report/$ver.inspection.json"               > "work/report/$ver.inspection.stdout"
+
+            jadx --show-bad-code --no-debug-info               -d "work/jadx/$ver" "$candidate"               > "work/report/$ver.jadx.log" 2>&1 || true
+            test -f "work/jadx/$ver/sources/com/canyua/publisherexpert/EditActivity.java"
+          done
+
+      - name: Build longitudinal save-gate receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import re
+          import zipfile
+          from pathlib import Path
+
+          EXPECTED_WRITER_415 = "0aff50700bd695794081cc3971f73389a6df6d76f0569876b85198e16b766ce6"
+          seed_paths = [
+              "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/Contents.dat",
+              "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/EscherStm.dat",
+              "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/QUILL_CONTENTS.dat",
+              "assets/Publisher Data/Publication Types/Blank Page Sizes/Standard/New Page Size/SummaryInformation.dat",
+          ]
+
+          rows = []
+          for ver in ("3.1.35", "3.1.27"):
+              pkg_files = list((Path("work/packages") / ver).iterdir())
+              assert pkg_files, ver
+              pkg = pkg_files[0]
+              edit_path = Path("work/jadx") / ver / "sources/com/canyua/publisherexpert/EditActivity.java"
+              edit = edit_path.read_text(errors="replace")
+
+              with zipfile.ZipFile(pkg) as z:
+                  names = set(z.namelist())
+                  writer_candidates = [
+                      "lib/arm64-v8a/libpubBuilder.so",
+                      "lib/armeabi-v7a/libpubBuilder.so",
+                  ]
+                  writer_path = next((p for p in writer_candidates if p in names), None)
+                  writer_sha = None
+                  writer_size = None
+                  if writer_path:
+                      blob = z.read(writer_path)
+                      writer_sha = hashlib.sha256(blob).hexdigest()
+                      writer_size = len(blob)
+
+                  seeds = {}
+                  for path in seed_paths:
+                      if path in names:
+                          blob = z.read(path)
+                          seeds[Path(path).name] = {
+                              "bytes": len(blob),
+                              "sha256": hashlib.sha256(blob).hexdigest(),
+                          }
+
+              methods = {}
+              for name in ("onSave", "onBackSave", "onExportComplete", "canExport", "doSaveAsPub"):
+                  m = re.search(
+                      rf"(?:public|private|protected)[^\n]*\b{name}\s*\([^)]*\)\s*\{{",
+                      edit,
+                  )
+                  methods[name] = bool(m)
+
+              row = {
+                  "version": ver,
+                  "package": pkg.name,
+                  "package_sha256": hashlib.sha256(pkg.read_bytes()).hexdigest(),
+                  "writer_path": writer_path,
+                  "writer_bytes": writer_size,
+                  "writer_sha256": writer_sha,
+                  "writer_matches_4_1_15_sha256": writer_sha == EXPECTED_WRITER_415,
+                  "seeds": seeds,
+                  "edit_activity": {
+                      "inapp_document_converter_mentions": len(re.findall(r"INAPP_DOCUMENT_CONVERTER", edit)),
+                      "create_pub_mentions": len(re.findall(r"createPub", edit)),
+                      "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\.pub"', edit)),
+                      "saving_mentions": len(re.findall(r"EXPORTACTION\.SAVING", edit)),
+                      "saveasing_mentions": len(re.findall(r"EXPORTACTION\.SAVEASING", edit)),
+                      "backsaving_mentions": len(re.findall(r"EXPORTACTION\.BACKSAVING", edit)),
+                      "purchase_dispatch_mentions": len(re.findall(r"PurchasesActivity\.onPurchases", edit)),
+                      "methods_present": methods,
+                  },
+              }
+              e = row["edit_activity"]
+              row["save_entitlement_gate_structurally_present"] = bool(
+                  e["inapp_document_converter_mentions"]
+                  and e["purchase_dispatch_mentions"]
+                  and methods["canExport"]
+                  and methods["doSaveAsPub"]
+                  and e["create_pub_mentions"]
+              )
+              rows.append(row)
+
+          report = {
+              "schema": "der/canyua-3x-writer-save-gate/v1",
+              "reference_writer_4_1_15_sha256": EXPECTED_WRITER_415,
+              "versions": rows,
+              "boundary": (
+                  "Static package/JADX evidence only. No purchase state, billing response, "
+                  "license, signature, PairIP or other access-control state is modified."
+              ),
+          }
+          Path("work/report/report.json").write_text(
+              json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+          )
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Capture focused control-flow excerpts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for ver in 3.1.35 3.1.27; do
+            EDIT="work/jadx/$ver/sources/com/canyua/publisherexpert/EditActivity.java"
+            {
+              echo "# Canyua $ver Save/PUB static map"
+              grep -n -C 12 -E                 'onSave\(|onBackSave\(|onExportComplete\(|canExport\(|doSaveAsPub\(|INAPP_DOCUMENT_CONVERTER|createPub\(|EXPORTACTION\.(SAVING|SAVEASING|BACKSAVING)'                 "$EDIT" || true
+            } > "work/report/$ver.save-map.txt"
+          done
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3x-writer-save-gate
+          path: work/report/
+          if-no-files-found: warn
+          retention-days: 30
