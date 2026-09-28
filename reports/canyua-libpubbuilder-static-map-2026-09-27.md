@@ -472,3 +472,60 @@ This would answer the remaining questions static inspection cannot:
 - identity allocation policy;
 - whether unknown records survive edits;
 - native Save round-trip fidelity across text/image/shape/table/master-page cases.
+
+## User-facing Save entitlement path in Canyua 5.1.1
+
+A focused JADX pass over the retained Canyua 5.1.1 base APK separates the
+existence of the native writer from the entitlement required to reach it through
+the shipped UI.
+
+Observed control flow for ordinary File -> Save:
+
+```text
+onSave()
+  -> exportAction = SAVING
+  -> ExportFragment
+  -> onExportComplete(...)
+  -> canExport()
+  -> INAPP_DOCUMENT_CONVERTER entitlement
+  -> doWillExport()
+  -> ASPUB
+  -> doSaveAsPub()
+  -> native createPub(...)
+```
+
+Save As follows the same writer edge:
+
+```text
+onSaveAs()
+  -> exportAction = SAVEASING
+  -> onExportComplete(ASPUB)
+  -> canExport()
+  -> doWillExport()
+  -> doSaveAsPub()
+  -> native createPub(...)
+```
+
+The close-document save prompt is not an independent free writer route.
+`onExportComplete()` explicitly groups `BACKSAVING` with `SAVING` and
+`SAVEASING` before calling `canExport()`.
+
+For non-Word/PowerPoint export types, `canExport()` checks
+`PurchasesActivity.INAPP_DOCUMENT_CONVERTER`; failure opens the purchase
+surface instead of invoking the build path. The resource description for this
+entitlement explicitly includes Microsoft Publisher (PUB) output.
+
+Therefore the evidence-backed statement for 5.1.1 is:
+
+> Canyua ships a real local native PUB writer, but the normal user-facing PUB
+> Save / Save As / back-save path is gated by the Document Converter
+> entitlement.
+
+This is a product-policy fact about the analyzed 5.1.1 build, not a limitation
+of `libpubBuilder.so` itself. It also must not be projected backward onto
+historical 4.1.x / 3.1.x builds without inspecting those packages.
+
+The dynamic oracle protocol must respect that boundary. It may use a historical
+or otherwise legitimately entitled build that exposes Save normally, but it
+must not patch purchase state, SharedPreferences, billing responses, PairIP,
+signatures, or related gates merely to reach `createPub()`.
