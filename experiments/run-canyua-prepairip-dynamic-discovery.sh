@@ -323,8 +323,10 @@ elif editor_surface:
     status = "opened_editor_surface"
 elif filename_visible:
     status = "opened_filename_visible"
-elif parser_hint:
-    status = "parser_activity_observed"
+elif direct_file_eacces and text("picker-status.txt"):
+    status = "direct_file_eacces_and_picker_failed"
+elif direct_file_eacces:
+    status = "direct_file_ingress_eacces"
 else:
     status = "launch_or_open_not_proven"
 
