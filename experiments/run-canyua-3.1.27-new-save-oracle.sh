@@ -378,7 +378,45 @@ if target is None or not tap_row(target):
 
 rows=dump("share-main-selected")
 share=[r for r in rows if r["rid"]==f"{pkg}:id/doc_share"]
-if len(share)!=1 or not tap_row(share[0]):
+if len(share)!=1:
+    # In 3.1.27 selection mode the document is visibly selected (select_icon),
+    # but Share is exposed through the normal action-bar overflow rather than
+    # as a standalone accessibility node. Open only the shipped overflow and
+    # require one exact Share action; do not guess coordinates or invoke any
+    # unrelated export/purchase control.
+    overflow=[
+        r for r in rows
+        if r["clickable"]=="true"
+        and (r["desc"].strip().lower()=="more options"
+             or r["text"].strip().lower()=="more options")
+    ]
+    if len(overflow)!=1 or not tap_row(overflow[0]):
+        raise SystemExit(54)
+    rows=dump("share-main-selected-overflow")
+    dangerous=re.compile(
+        r'purchase|buy|unlock|subscription|subscribe|payment|upgrade|document converter|in-app',
+        re.I,
+    )
+    if any(
+        dangerous.search((r["text"] or r["desc"]))
+        for r in rows if (r["text"] or r["desc"])
+    ):
+        raise SystemExit(42)
+    share=[
+        r for r in rows
+        if r["clickable"]=="true"
+        and (
+            (r["text"] or r["desc"]).strip().lower()=="share"
+            or r["rid"]==f"{pkg}:id/doc_share"
+            or r["rid"].lower().endswith("/share")
+        )
+    ]
+if len(share)!=1:
+    raise SystemExit(54)
+(out/"share-action-control.json").write_text(
+    json.dumps(share[0],indent=2,ensure_ascii=False)+"\n"
+)
+if not tap_row(share[0]):
     raise SystemExit(54)
 
 # MainActivity.shareDocument() uses normal ACTION_CREATE_DOCUMENT requestCode=2.
