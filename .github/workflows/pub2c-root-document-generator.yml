@@ -43,3 +43,4 @@ jobs:
           python3 -m pip install --disable-pip-version-check olefile
           python3 experiments/generate-pub2c-root-document.py work/base.apk
           python3 experiments/test_pub2c_root_document_generator.py
+          python3 experiments/validate-pub2c-generated-frontier.py work/base.apk
