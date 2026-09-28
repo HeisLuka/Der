@@ -1,0 +1,153 @@
+name: Probe historical Canyua versions via APKPure
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-apkpure-old-version-probe.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: List versions exposed by APKPure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/packages work/report
+          docker run --rm ghcr.io/efforg/apkeep:stable \
+            -l -a com.canyua.publisherexpert -d apk-pure \
+            > work/report/versions.txt 2> work/report/versions.stderr || true
+          cat work/report/versions.txt
+          cat work/report/versions.stderr >&2 || true
+
+      - name: Download selected historical versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > work/report/downloads.tsv
+          for ver in 4.1.15 4.1.14 4.1.12 3.1.35; do
+            outdir="$PWD/work/packages/$ver"
+            mkdir -p "$outdir"
+            status=success
+            docker run --rm \
+              -v "$outdir:/output" \
+              ghcr.io/efforg/apkeep:stable \
+              -a "com.canyua.publisherexpert@$ver" \
+              -d apk-pure /output \
+              > "work/report/$ver.stdout" 2> "work/report/$ver.stderr" || status=failure
+
+            file="$(find "$outdir" -maxdepth 1 -type f | head -n1 || true)"
+            if [ -n "$file" ]; then
+              bytes="$(stat -c %s "$file")"
+              sha="$(sha256sum "$file" | awk '{print $1}')"
+              magic="$(xxd -p -l 4 "$file" || true)"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$ver" "$status" "$bytes" "$sha" "$magic" "$(basename "$file")" \
+                >> work/report/downloads.tsv
+            else
+              printf '%s\t%s\t0\t\t\t\n' "$ver" "$status" \
+                >> work/report/downloads.tsv
+            fi
+          done
+          cat work/report/downloads.tsv
+
+      - name: Inspect acquired package candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+
+          rows = []
+          for ver_dir in sorted(Path("work/packages").iterdir()):
+              if not ver_dir.is_dir():
+                  continue
+              files = list(ver_dir.iterdir())
+              if not files:
+                  continue
+              p = files[0]
+              row = {
+                  "version_requested": ver_dir.name,
+                  "filename": p.name,
+                  "bytes": p.stat().st_size,
+                  "is_zip": zipfile.is_zipfile(p),
+              }
+              if zipfile.is_zipfile(p):
+                  z = zipfile.ZipFile(p)
+                  names = z.namelist()
+                  row["abis"] = sorted({
+                      n.split("/")[1] for n in names
+                      if n.startswith("lib/") and n.count("/") >= 2
+                  })
+                  scan = [
+                      n for n in names
+                      if n.endswith(".dex") or n == "AndroidManifest.xml" or n.endswith(".so")
+                  ]
+                  needles = {
+                      "pairip": [b"com/pairip", b"com.pairip", b"licensecheck", b"LicenseActivity"],
+                      "reader": [b"mspubCore", b"MSPUBDocument", b"libmspub"],
+                      "writer": [b"libpubBuilder", b"MSPUBBuilder", b"createPub"],
+                  }
+                  hits = {k: [] for k in needles}
+                  for name in scan:
+                      try:
+                          blob = z.read(name).lower()
+                      except Exception:
+                          continue
+                      for group, pats in needles.items():
+                          for pat in pats:
+                              if pat.lower() in blob:
+                                  hits[group].append({
+                                      "file": name,
+                                      "needle": pat.decode("ascii", "replace"),
+                                  })
+                  row["pairip_present"] = bool(hits["pairip"])
+                  row["reader_markers_present"] = bool(hits["reader"])
+                  row["writer_markers_present"] = bool(hits["writer"])
+                  row["marker_hits"] = hits
+              rows.append(row)
+
+          report = {
+              "schema": "der/canyua-apkpure-historical-versions/v1",
+              "boundary": (
+                  "Packages requested through apkeep's documented APKPure version mechanism. "
+                  "No Google Play entitlement, license, PairIP or archive anti-bot bypass."
+              ),
+              "packages": rows,
+          }
+          Path("work/report/report.json").write_text(
+              json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+          )
+          print(json.dumps(report, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-apkpure-old-version-probe
+          path: work/report/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload historical packages temporarily
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-apkpure-historical-packages
+          path: work/packages/
+          if-no-files-found: ignore
+          retention-days: 7

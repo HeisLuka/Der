@@ -1,0 +1,194 @@
+name: Map Canyua save/export UI statically
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-ui-save-static-map.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install static-analysis tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y aapt unzip jq ripgrep
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^jadx-.*\\.zip$")) | .browser_download_url' \
+            | head -n1)"
+          test -n "$JADX_URL"
+          curl -fL "$JADX_URL" -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d "$RUNNER_TEMP/jadx"
+          echo "$RUNNER_TEMP/jadx/bin" >> "$GITHUB_PATH"
+
+      - name: Download pinned Canyua 5.1.1 package artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/package work/apks work/report
+          gh run download 36275409853 \
+            --repo HeisLuka/Der \
+            --name package-canyua-publisher \
+            --dir work/package
+          XAPK="$(find work/package -type f \( -name '*.xapk' -o -name '*.apks' -o -name '*.zip' \) | head -n1)"
+          test -n "$XAPK"
+          unzip -q "$XAPK" -d work/apks
+
+          BASE=""
+          while IFS= read -r apk; do
+            badge="$(aapt dump badging "$apk" 2>/dev/null | head -n1 || true)"
+            if [ -n "$badge" ] && ! grep -q " split='" <<<"$badge"; then
+              BASE="$apk"
+              break
+            fi
+          done < <(find work/apks -type f -name '*.apk' | sort)
+          test -n "$BASE"
+          printf '%s\n' "$BASE" > work/base-apk.txt
+          sha256sum "$BASE" > work/base-apk.sha256
+
+      - name: Download admitted Canyua 4.1.15 runtime artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/historical-runtime
+          gh run download 36401841787 \
+            --repo HeisLuka/Der \
+            --name canyua-prepairip-runtime-package \
+            --dir work/historical-runtime
+
+          HIST="work/historical-runtime/runtime-apks/com.canyua.publisherexpert.apk"
+          test -f "$HIST"
+          cp "$HIST" work/canyua-4.1.15.apk
+          unzip -t work/canyua-4.1.15.apk >/dev/null
+          sha256sum work/canyua-4.1.15.apk > work/historical-apk.sha256
+          printf 'available_from_admitted_runtime_artifact\n' > work/historical-status.txt
+
+      - name: Decompile base APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="$(cat work/base-apk.txt)"
+          jadx --show-bad-code --no-debug-info -d work/jadx "$BASE" >/tmp/jadx.log 2>&1 || true
+          tail -n 100 /tmp/jadx.log > work/report/jadx.log
+          test -f work/jadx/sources/com/canyua/publisherexpert/EditActivity.java
+          if [ -f work/canyua-4.1.15.apk ]; then
+            jadx --show-bad-code --no-debug-info -d work/jadx-4x work/canyua-4.1.15.apk >/tmp/jadx-4x.log 2>&1 || true
+            tail -n 100 /tmp/jadx-4x.log > work/report/jadx-4x.log
+          fi
+
+      - name: Build save/export control-flow map
+        shell: bash
+        run: |
+          set -euo pipefail
+          EDIT=work/jadx/sources/com/canyua/publisherexpert/EditActivity.java
+          OUT=work/report/canyua-ui-save-static-map.txt
+
+          {
+            echo '# Canyua 5.1.1 save/export static map'
+            echo
+            echo 'Boundary: static control-flow/resource evidence only; do not assume historical pre-PairIP UI is identical.'
+            echo
+            echo '## EditActivity symbol hits'
+            rg -n -C 12 \
+              'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
+              "$EDIT" || true
+            echo
+            echo '## Relevant menus/layouts/strings'
+            rg -n -C 3 \
+              'save|Save|export|Export|publisher|Publisher|document_converter|open_in_pdf|Microsoft Office Publisher' \
+              work/jadx/resources/res/menu \
+              work/jadx/resources/res/layout \
+              work/jadx/resources/res/values/strings.xml \
+              work/jadx/resources/res/values/public.xml 2>/dev/null || true
+          } > "$OUT"
+
+          if [ -f work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java ]; then
+            {
+              echo
+              echo '## Historical 4.1.15 EditActivity symbol hits'
+              rg -n -C 12 \
+                'save_save|save_do_not_save|INAPP_DOCUMENT_CONVERTER|onExportComplete|_exportedName.*\.pub|createPub|native .*createPub|doSave|saveAs|SaveAs|EXPORTASTYPE' \
+                work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java || true
+              echo
+              echo '## Historical 4.1.15 relevant resources'
+              rg -n -C 3 \
+                'save|Save|export|Export|publisher|Publisher|document_converter|open_in_pdf|Microsoft Office Publisher' \
+                work/jadx-4x/resources/res/menu \
+                work/jadx-4x/resources/res/layout \
+                work/jadx-4x/resources/res/values/strings.xml \
+                work/jadx-4x/resources/res/values/public.xml 2>/dev/null || true
+            } >> "$OUT"
+          fi
+
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          edit = Path("work/jadx/sources/com/canyua/publisherexpert/EditActivity.java").read_text(errors="replace")
+          resources = ""
+          for p in [
+              Path("work/jadx/resources/res/values/strings.xml"),
+              Path("work/jadx/resources/res/values/public.xml"),
+          ]:
+              if p.exists():
+                  resources += p.read_text(errors="replace") + "\n"
+
+          hist_path = Path("work/jadx-4x/sources/com/canyua/publisherexpert/EditActivity.java")
+          hist = hist_path.read_text(errors="replace") if hist_path.exists() else ""
+          facts = {
+              "schema": "der/canyua-ui-save-static-map/v1",
+              "version_scope": "Canyua 5.1.1 retained package",
+              "has_save_prompt": bool(re.search(r"save_save|save_do_not_save", edit)),
+              "document_converter_checks": len(re.findall(r"INAPP_DOCUMENT_CONVERTER", edit)),
+              "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\.pub"', edit)),
+              "create_pub_mentions": len(re.findall(r"createPub", edit)),
+              "has_document_converter_resource": "document_converter" in resources,
+              "historical_4_1_15_available": bool(hist),
+              "historical_4_1_15": {
+                  "has_save_prompt": bool(re.search(r"save_save|save_do_not_save", hist)) if hist else None,
+                  "document_converter_checks": len(re.findall(r"INAPP_DOCUMENT_CONVERTER", hist)) if hist else None,
+                  "pub_extension_assignments": len(re.findall(r'_exportedName\s*\+=\s*"\.pub"', hist)) if hist else None,
+                  "create_pub_mentions": len(re.findall(r"createPub", hist)) if hist else None,
+              },
+              "boundary": (
+                  "Static evidence maps 5.1.1 control flow only. Purchase checks must not be bypassed, "
+                  "and historical pre-PairIP builds require their own runtime/static confirmation."
+              ),
+          }
+          Path("work/report/canyua-ui-save-static-map.json").write_text(
+              json.dumps(facts, indent=2) + "\n"
+          )
+          print(json.dumps(facts, indent=2))
+          PY
+
+      - name: Upload map
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-ui-save-static-map
+          path: |
+            work/base-apk.sha256
+            work/historical-apk.sha256
+            work/historical-status.txt
+            work/report/
+          if-no-files-found: warn
+          retention-days: 30

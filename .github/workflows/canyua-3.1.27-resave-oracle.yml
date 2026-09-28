@@ -1,0 +1,162 @@
+name: Canyua 3.1.27 no-op PUB Save oracle
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-3.1.27-resave-oracle.yml"
+      - "experiments/run-canyua-3.1.27-resave-control.sh"
+      - "experiments/inspect-canyua-package.py"
+      - "experiments/diff-pub-cfb.py"
+      - "experiments/analyze-canyua-oracle-bundle.py"
+      - "experiments/probe-canyua-contents-profile.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  resave:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable KVM access
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm
+
+      - name: Acquire pinned public Canyua 3.1.27
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/acquire work/canyua-3127
+
+          docker run --rm             -v "$PWD/work/acquire:/output"             ghcr.io/efforg/apkeep:stable             -a "com.canyua.publisherexpert@3.1.27"             -d apk-pure /output             > work/canyua-3127/download.stdout             2> work/canyua-3127/download.stderr
+
+          APK="$(find work/acquire -maxdepth 1 -type f | head -n1)"
+          test -n "$APK"
+          cp "$APK" work/canyua-3.1.27.apk
+
+          expected='23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682'
+          actual="$(sha256sum work/canyua-3.1.27.apk | awk '{print $1}')"
+          printf '%s  %s\n' "$actual" work/canyua-3.1.27.apk             | tee work/canyua-3127/package.sha256
+          test "$actual" = "$expected"
+
+          python3 experiments/inspect-canyua-package.py             work/canyua-3.1.27.apk             --json work/canyua-3127/package-inspection.json             --require-eligible             > work/canyua-3127/package-inspection.stdout
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path("work/canyua-3127/package-inspection.json").read_text())
+          assert r["pairip_present"] is False, r
+          assert r["reader_markers_present"] is True, r
+          assert r["writer_markers_present"] is True, r
+          assert "arm64-v8a" in r["abis"], r
+          print(json.dumps(r,indent=2))
+          PY
+
+      - name: Install oracle analysis dependency
+        run: python3 -m pip install --disable-pip-version-check olefile
+
+      - name: Download pinned PUB control
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3             https://raw.githubusercontent.com/apache/poi/74700b5692fd0449031ac6a3c78aec1155d144d5/test-data/publisher/Sample.pub             -o work/Sample.pub
+          echo "6fefdef46b87c767150878dc384549cb2d2ec2ac54de25f8ddb3a5628301107e  work/Sample.pub"             | sha256sum -c -
+
+      - name: Run normal UI open and one guarded Save
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_4
+          cores: 2
+          ram-size: 3072M
+          heap-size: 768M
+          disk-size: 6G
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -no-metrics
+            -gpu swiftshader_indirect
+          script: bash experiments/run-canyua-3.1.27-resave-control.sh
+
+      - name: Analyze captured no-op Save
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/canyua-3127/analysis
+          status="$(cat work/canyua-3127/status.txt 2>/dev/null || printf 'runtime_step_failed_before_status')"
+          printf '%s\n' "$status" | tee work/canyua-3127/analysis/status.txt
+
+          if [ -f work/canyua-3127/oracle-bundle/resave-control.pub ]; then
+            python3 experiments/diff-pub-cfb.py               work/canyua-3127/oracle-bundle/source.pub               work/canyua-3127/oracle-bundle/resave-control.pub               --json work/canyua-3127/analysis/source-to-resave.diff.json
+
+            python3 experiments/probe-canyua-contents-profile.py               --pub work/canyua-3127/oracle-bundle/resave-control.pub               --json work/canyua-3127/analysis/resave.contents-profile.json               || true
+
+            python3 experiments/analyze-canyua-oracle-bundle.py               --bundle work/canyua-3127/oracle-bundle               --json work/canyua-3127/analysis/oracle-bundle.json               --markdown work/canyua-3127/analysis/oracle-bundle.md
+          fi
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root=Path("work/canyua-3127")
+          bundle=root/"oracle-bundle"
+          def digest(p):
+              if not p.exists(): return None
+              h=hashlib.sha256()
+              h.update(p.read_bytes())
+              return {"bytes":p.stat().st_size,"sha256":h.hexdigest()}
+
+          status=(root/"status.txt").read_text(errors="replace").strip() if (root/"status.txt").exists() else "runtime_step_failed_before_status"
+          report={
+              "schema":"der/canyua-3.1.27-resave-oracle/v1",
+              "version":"3.1.27",
+              "package_sha256":"23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682",
+              "status":status,
+              "source":digest(bundle/"source.pub"),
+              "resave_control":digest(bundle/"resave-control.pub"),
+              "purchase_stop_rule":"Stop immediately if purchase/buy/unlock/subscription/payment/upgrade surface is observed.",
+              "access_boundary":"Only the shipped ordinary Save UI is invoked; no purchase, billing, preference, license, signature, PairIP or protection state is modified.",
+          }
+          Path("work/canyua-3127/analysis/summary.json").write_text(json.dumps(report,indent=2)+"\n")
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload writer-oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-resave-oracle-evidence
+          path: |
+            work/canyua-3127/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload captured PUB output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-resave-control-pub
+          path: work/canyua-3127/oracle-bundle/resave-control.pub
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,176 @@
+name: Canyua 3.x writer binary chronology
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-3x-writer-binary-diff.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Acquire pinned historical packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/pkgs work/out work/report
+          for ver in 3.1.27 3.1.35 4.1.15; do
+            mkdir -p "work/pkgs/$ver"
+            docker run --rm               -v "$PWD/work/pkgs/$ver:/output"               ghcr.io/efforg/apkeep:stable               -a "com.canyua.publisherexpert@$ver"               -d apk-pure /output               > "work/report/$ver.download.stdout"               2> "work/report/$ver.download.stderr"
+          done
+
+      - name: Extract ARM64 writers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, zipfile
+          from pathlib import Path
+
+          out=Path("work/out")
+          report={}
+          for ver in ("3.1.27","3.1.35","4.1.15"):
+              pkg=next(p for p in (Path("work/pkgs")/ver).iterdir() if p.is_file())
+              package_sha=hashlib.sha256(pkg.read_bytes()).hexdigest()
+              candidates=[]
+              with zipfile.ZipFile(pkg) as z:
+                  names=z.namelist()
+                  direct="lib/arm64-v8a/libpubBuilder.so"
+                  if direct in names:
+                      candidates.append((pkg.name,direct,z.read(direct)))
+                  for name in names:
+                      if not name.lower().endswith(".apk"):
+                          continue
+                      nested_bytes=z.read(name)
+                      nested_path=out/f"{ver}-{Path(name).name}"
+                      nested_path.write_bytes(nested_bytes)
+                      try:
+                          with zipfile.ZipFile(nested_path) as nz:
+                              if direct in nz.namelist():
+                                  candidates.append((name,direct,nz.read(direct)))
+                      except zipfile.BadZipFile:
+                          pass
+              if len(candidates) != 1:
+                  raise SystemExit(f"{ver}: expected one arm64 writer, got {[(a,b,len(c)) for a,b,c in candidates]}")
+              source, path, blob=candidates[0]
+              target=out/f"{ver}-libpubBuilder.so"
+              target.write_bytes(blob)
+              report[ver]={
+                  "package":pkg.name,
+                  "package_sha256":package_sha,
+                  "writer_source":source,
+                  "writer_bytes":len(blob),
+                  "writer_sha256":hashlib.sha256(blob).hexdigest(),
+              }
+          Path("work/report/input.json").write_text(json.dumps(report,indent=2)+"\n")
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Compare binaries and symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, re, subprocess
+          from pathlib import Path
+
+          vers=["3.1.27","3.1.35","4.1.15"]
+          info=json.loads(Path("work/report/input.json").read_text())
+
+          def run(*args):
+              return subprocess.check_output(args,text=True,errors="replace")
+
+          def symbols(path):
+              txt=run("nm","-D","-S","--defined-only",str(path))
+              rows={}
+              for line in txt.splitlines():
+                  parts=line.split()
+                  if len(parts) >= 4:
+                      try:
+                          size=int(parts[1],16)
+                      except Exception:
+                          continue
+                      rows[parts[3]]=size
+              return rows
+
+          def build_id(path):
+              txt=run("readelf","-n",str(path))
+              m=re.search(r"Build ID:\s*([0-9a-fA-F]+)",txt)
+              return m.group(1).lower() if m else None
+
+          def normalized(path, label):
+              blob=bytearray(path.read_bytes())
+              bid_hex=build_id(path)
+              if not bid_hex:
+                  raise SystemExit(f"{label}: GNU Build ID not found")
+              bid=bytes.fromhex(bid_hex)
+              positions=[]
+              start=0
+              while True:
+                  pos=bytes(blob).find(bid,start)
+                  if pos < 0:
+                      break
+                  positions.append(pos)
+                  start=pos+1
+              if len(positions) != 1:
+                  raise SystemExit(f"{label}: expected one Build ID payload occurrence, got {positions}")
+              pos=positions[0]
+              blob[pos:pos+len(bid)]=b"\\x00"*len(bid)
+              return hashlib.sha256(bytes(blob)).hexdigest()
+
+          sym={v:symbols(Path("work/out")/f"{v}-libpubBuilder.so") for v in vers}
+          for v in vers:
+              p=Path("work/out")/f"{v}-libpubBuilder.so"
+              info[v]["build_id"]=build_id(p)
+              info[v]["normalized_no_build_id_sha256"]=normalized(p,v)
+              info[v]["defined_dynamic_symbol_count"]=len(sym[v])
+
+          pairs=[]
+          for a,b in zip(vers,vers[1:]):
+              pa=Path("work/out")/f"{a}-libpubBuilder.so"
+              pb=Path("work/out")/f"{b}-libpubBuilder.so"
+              ba=pa.read_bytes(); bb=pb.read_bytes()
+              limit=min(len(ba),len(bb))
+              raw_diff=sum(1 for i in range(limit) if ba[i]!=bb[i]) + abs(len(ba)-len(bb))
+              names_a=set(sym[a]); names_b=set(sym[b])
+              common=names_a&names_b
+              size_changes=[
+                  {"symbol":n,"a":sym[a][n],"b":sym[b][n]}
+                  for n in sorted(common) if sym[a][n]!=sym[b][n]
+              ]
+              pairs.append({
+                  "a":a,"b":b,
+                  "raw_byte_difference_count":raw_diff,
+                  "same_size":len(ba)==len(bb),
+                  "same_after_build_id_removal":info[a]["normalized_no_build_id_sha256"]==info[b]["normalized_no_build_id_sha256"],
+                  "symbols_added":sorted(names_b-names_a),
+                  "symbols_removed":sorted(names_a-names_b),
+                  "common_symbol_size_change_count":len(size_changes),
+                  "common_symbol_size_changes":size_changes[:500],
+              })
+
+          report={
+              "schema":"der/canyua-3x-writer-binary-chronology/v1",
+              "versions":info,
+              "pairs":pairs,
+              "boundary":"Static binary chronology only; no runtime entitlement state or access control is modified.",
+          }
+          Path("work/report/report.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(report,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Upload chronology receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3x-writer-binary-chronology
+          path: work/report/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,171 @@
+name: Canyua 3.1.27 one-page New Save oracle
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-3.1.27-new-save-oracle.yml"
+      - "experiments/run-canyua-3.1.27-new-save-oracle.sh"
+      - "experiments/inspect-canyua-package.py"
+      - "experiments/probe-canyua-contents-profile.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  new-save:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable KVM access
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm
+
+      - name: Acquire pinned public Canyua 3.1.27
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/acquire work/canyua-new-save
+          docker run --rm \
+            -v "$PWD/work/acquire:/output" \
+            ghcr.io/efforg/apkeep:stable \
+            -a "com.canyua.publisherexpert@3.1.27" \
+            -d apk-pure /output \
+            > work/canyua-new-save/download.stdout \
+            2> work/canyua-new-save/download.stderr
+
+          APK="$(find work/acquire -maxdepth 1 -type f | head -n1)"
+          test -n "$APK"
+          cp "$APK" work/canyua-3.1.27.apk
+          expected='23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682'
+          actual="$(sha256sum work/canyua-3.1.27.apk | awk '{print $1}')"
+          test "$actual" = "$expected"
+
+          python3 experiments/inspect-canyua-package.py \
+            work/canyua-3.1.27.apk \
+            --json work/canyua-new-save/package-inspection.json \
+            --require-eligible \
+            > work/canyua-new-save/package-inspection.stdout
+
+      - name: Install CFB analysis dependency
+        run: python3 -m pip install --disable-pip-version-check olefile
+
+      - name: Run one-page New then ordinary Save
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_4
+          cores: 2
+          ram-size: 3072M
+          heap-size: 768M
+          disk-size: 6G
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -no-metrics
+            -gpu swiftshader_indirect
+          script: bash experiments/run-canyua-3.1.27-new-save-oracle.sh
+
+      - name: Analyze naturally produced PUB
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/canyua-new-save/analysis
+          status="$(cat work/canyua-new-save/status.txt 2>/dev/null || printf 'runtime_step_failed_before_status')"
+          printf '%s\n' "$status" > work/canyua-new-save/analysis/status.txt
+          printf 'behavioral_status=%s\n' "$status"
+          if [ -f work/canyua-new-save/share-capture.rc ]; then
+            printf 'share_capture_rc=%s\n' "$(cat work/canyua-new-save/share-capture.rc)"
+          fi
+          if [ -s work/canyua-new-save/share-capture.stderr ]; then
+            echo '--- share-capture.stderr ---'
+            cat work/canyua-new-save/share-capture.stderr
+          fi
+
+          if [ -f work/canyua-new-save/output/new-save.pub ]; then
+            python3 experiments/probe-canyua-contents-profile.py \
+              --pub work/canyua-new-save/output/new-save.pub \
+              --json work/canyua-new-save/analysis/contents-profile.json || true
+
+            python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          import olefile
+
+          root=Path("work/canyua-new-save")
+          p=root/"output"/"new-save.pub"
+          streams=[]
+          ole=olefile.OleFileIO(str(p))
+          for parts in ole.listdir(streams=True, storages=False):
+              name="/".join(parts)
+              data=ole.openstream(parts).read()
+              streams.append({
+                  "name":name,
+                  "bytes":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+              })
+          ole.close()
+          (root/"analysis"/"cfb-streams.json").write_text(
+              json.dumps(sorted(streams,key=lambda x:x["name"]),indent=2)+"\n"
+          )
+          PY
+          fi
+
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path("work/canyua-new-save")
+          p=root/"output"/"new-save.pub"
+          status=(root/"status.txt").read_text(errors="replace").strip() if (root/"status.txt").exists() else "runtime_step_failed_before_status"
+          digest=None
+          if p.exists():
+              b=p.read_bytes()
+              digest={"bytes":len(b),"sha256":hashlib.sha256(b).hexdigest(),"cfb_magic":b[:8].hex()}
+          report={
+              "schema":"der/canyua-3.1.27-new-save-oracle/v1",
+              "version":"3.1.27",
+              "package_sha256":"23a1511478458776594e48d7f0d1dbd7e9ba7145e338dfc90bfe80fdcc0c4682",
+              "status":status,
+              "output":digest,
+              "scenario":"Normal shipped UI: New document with default paper settings -> one-page editor -> one ordinary Save.",
+              "access_boundary":"No purchase, billing, preference, license, signature, PairIP or protection state is modified.",
+          }
+          (root/"analysis"/"summary.json").write_text(json.dumps(report,indent=2)+"\n")
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload New Save evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-new-save-oracle-evidence
+          path: work/canyua-new-save/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload naturally produced PUB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-3.1.27-new-save-pub
+          path: work/canyua-new-save/output/new-save.pub
+          if-no-files-found: ignore
+          retention-days: 7

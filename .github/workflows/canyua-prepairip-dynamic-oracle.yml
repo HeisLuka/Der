@@ -1,0 +1,209 @@
+name: Canyua pre-PairIP dynamic oracle discovery
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canyua-prepairip-dynamic-oracle.yml"
+      - "experiments/run-canyua-prepairip-dynamic-discovery.sh"
+      - "experiments/inspect-canyua-package.py"
+      - "experiments/analyze-canyua-oracle-bundle.py"
+      - "experiments/diff-pub-cfb.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Self-test oracle analyzers
+        run: |
+          python3 experiments/diff-pub-cfb.py --self-test
+          python3 experiments/analyze-canyua-oracle-bundle.py --self-test
+
+      - name: List APKPure versions and acquire first eligible historical build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/acquire work/runtime/runtime-apks work/reports
+
+          docker run --rm ghcr.io/efforg/apkeep:stable \
+            -l -a com.canyua.publisherexpert -d apk-pure \
+            > work/reports/apkpure-versions.txt \
+            2> work/reports/apkpure-versions.stderr || true
+
+          : > work/reports/candidate-attempts.tsv
+          selected=''
+          for ver in 3.1.27 4.1.15 4.1.14 4.1.12 4.1.11 4.1.10 3.1.35 3.1.21 3.1.16; do
+            outdir="$PWD/work/acquire/$ver"
+            mkdir -p "$outdir"
+
+            status=downloaded
+            docker run --rm \
+              -v "$outdir:/output" \
+              ghcr.io/efforg/apkeep:stable \
+              -a "com.canyua.publisherexpert@$ver" \
+              -d apk-pure /output \
+              > "work/reports/$ver.download.stdout" \
+              2> "work/reports/$ver.download.stderr" || status=download_failed
+
+            candidate="$(find "$outdir" -maxdepth 1 -type f | head -n1 || true)"
+            if [ -z "$candidate" ]; then
+              printf '%s\t%s\t0\tno_file\n' "$ver" "$status" \
+                >> work/reports/candidate-attempts.tsv
+              continue
+            fi
+
+            bytes="$(stat -c %s "$candidate")"
+            sha="$(sha256sum "$candidate" | awk '{print $1}')"
+            rm -rf work/runtime/runtime-apks
+            mkdir -p work/runtime/runtime-apks
+
+            if python3 experiments/inspect-canyua-package.py \
+                "$candidate" \
+                --json "work/reports/$ver.inspection.json" \
+                --extract-apks work/runtime/runtime-apks \
+                --require-eligible \
+                > "work/reports/$ver.inspection.stdout"; then
+              printf '%s\teligible\t%s\t%s\n' "$ver" "$bytes" "$sha" \
+                >> work/reports/candidate-attempts.tsv
+              printf '%s\n' "$ver" > work/runtime/selected-version.txt
+              printf '%s\n' "$sha" > work/runtime/selected-package.sha256
+              cp "work/reports/$ver.inspection.json" work/runtime/candidate-report.json
+              selected="$ver"
+              break
+            else
+              inspect_status=$?
+              printf '%s\tnot_eligible_%s\t%s\t%s\n' \
+                "$ver" "$inspect_status" "$bytes" "$sha" \
+                >> work/reports/candidate-attempts.tsv
+            fi
+          done
+
+          cat work/reports/candidate-attempts.tsv
+          if [ -z "$selected" ]; then
+            echo "No historical APKPure build met pre-PairIP reader+writer admission." >&2
+            exit 1
+          fi
+
+          echo "Selected Canyua version: $selected"
+          cat work/runtime/candidate-report.json
+          find work/runtime/runtime-apks -maxdepth 1 -type f -name '*.apk' \
+            -exec sha256sum {} \; \
+            | sort > work/runtime/runtime-apks.sha256
+
+      - name: Upload acquisition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-prepairip-acquisition-evidence
+          path: work/reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload admitted runtime package
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-prepairip-runtime-package
+          path: work/runtime/
+          if-no-files-found: error
+          retention-days: 7
+
+  discover:
+    needs: acquire
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable KVM access
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm
+
+      - name: Download admitted historical package
+        uses: actions/download-artifact@v4
+        with:
+          name: canyua-prepairip-runtime-package
+          path: work/runtime
+
+      - name: Verify admission receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f work/runtime/candidate-report.json
+          test -f work/runtime/selected-version.txt
+          test -d work/runtime/runtime-apks
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("work/runtime/candidate-report.json")
+          r = json.loads(p.read_text())
+          assert r["pairip_present"] is False, r
+          assert r["reader_markers_present"] is True, r
+          assert r["writer_markers_present"] is True, r
+          assert r["admission"] == "eligible_for_normal_runtime_probe", r
+          print("version:", Path("work/runtime/selected-version.txt").read_text().strip())
+          print("abis:", r.get("abis"))
+          print("apk_count:", r.get("apk_count"))
+          PY
+
+      - name: Download pinned PUB control
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/apache/poi/74700b5692fd0449031ac6a3c78aec1155d144d5/test-data/publisher/Sample.pub \
+            -o work/Sample.pub
+          actual="$(sha256sum work/Sample.pub | awk '{print $1}')"
+          expected='6fefdef46b87c767150878dc384549cb2d2ec2ac54de25f8ddb3a5628301107e'
+          test "$actual" = "$expected"
+
+      - name: Run normal Android launch and offline open
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_4
+          cores: 2
+          ram-size: 3072M
+          heap-size: 768M
+          disk-size: 6G
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: >-
+            -no-snapshot
+            -noaudio
+            -no-boot-anim
+            -no-window
+            -no-metrics
+            -gpu swiftshader_indirect
+          script: bash experiments/run-canyua-prepairip-dynamic-discovery.sh
+
+      - name: Upload dynamic discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canyua-prepairip-dynamic-oracle-discovery
+          path: |
+            work/runtime/candidate-report.json
+            work/runtime/selected-version.txt
+            work/runtime/selected-package.sha256
+            work/runtime/runtime-apks.sha256
+            work/dynamic/
+          if-no-files-found: warn
+          retention-days: 30
