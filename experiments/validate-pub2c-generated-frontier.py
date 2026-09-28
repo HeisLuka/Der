@@ -16,6 +16,7 @@ def load(name,file):
 
 pre=load("pub2c_prechunk","generate-pub2c-prechunk.py")
 doc=load("pub2c_root_document","generate-pub2c-root-document.py")
+fancy=load("pub2c_fancyborders","generate-pub2c-fancyborders.py")
 base=doc.load_base()
 
 def contents(blob):
@@ -35,8 +36,18 @@ def validate(apk):
                 profile=prof,
             )
             off,raw,model,fields=doc.parse_model(base,c)
-            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"
-            expected=c[:off+len(raw)+8]
+            refs=fancy.directory_refs(c)
+            ba_ref=next(r for r in refs if r["seq"]==261 and r["type"]==0x46 and r["parent"]==256)
+            ba_len=int.from_bytes(c[ba_ref["off"]:ba_ref["off"]+4],"little")
+            ba_raw=c[ba_ref["off"]:ba_ref["off"]+ba_len]
+            ba_defs=fancy.parse_fancy_borders(ba_raw)
+            ba_generated=fancy.build_fancy_borders(ba_defs)
+            mm_ref=next(r for r in refs if r["seq"]==262 and r["type"]==0x54 and r["parent"]==256)
+            mm_len=int.from_bytes(c[mm_ref["off"]:mm_ref["off"]+4],"little")
+            if mm_len != 4:
+                raise AssertionError(f"{name}: MailMergeData not empty: {mm_len}")
+            generated=prefix+doc.build_document(model)+b"\x04\x00\x00\x00"+b"\x04\x00\x00\x00"+ba_generated+b"\x04\x00\x00\x00"
+            expected=c[:mm_ref["off"]+mm_len]
             if len(prefix)!=off or generated!=expected:
                 lim=min(len(generated),len(expected))
                 at=next((i for i in range(lim) if generated[i]!=expected[i]),lim)
