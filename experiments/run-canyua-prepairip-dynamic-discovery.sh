@@ -73,7 +73,10 @@ adb shell getprop ro.build.version.release | tee "$RESULTS/android-release.txt" 
 
 echo "=== install selected pre-PairIP candidate ==="
 APK_DIR="$WORK/runtime/runtime-apks"
-mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' | sort)
+APKS=()
+while IFS= read -r apk; do
+  APKS+=("$apk")
+done < <(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' | sort)
 if [ "${#APKS[@]}" -eq 0 ]; then
   echo "No runtime APKs found in $APK_DIR" >&2
   exit 2
